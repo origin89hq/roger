@@ -243,6 +243,10 @@ export const deviceApproval = z.strictObject({
 export const machineRef = z.strictObject({
   machineId: z.string().regex(ULID_PATTERN, "must be a machine id"),
 });
+/** A requester name from a previous page, including renamed ones. */
+export const requesterCursor = z.strictObject({
+  after: z.string().min(1).max(300).optional(),
+});
 export const machineCursor = z.strictObject({
   after: z.string().regex(ULID_PATTERN, "must be a machine id").optional(),
 });

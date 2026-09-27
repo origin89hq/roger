@@ -140,14 +140,20 @@ pub fn login(
         machine = token.machine,
         owner = token.owner,
     );
-    if let Some(file) = token_file.filter(|file| file.is_file()) {
-        eprintln!(
-            "roger: {} still takes precedence over this login. Adopt its requester to this \
-             machine in Settings and move the file away to use the login.",
-            file.display()
-        );
+    if let Some(notice) = token_file_notice(token_file) {
+        eprintln!("roger: {notice}");
     }
     Ok(0)
+}
+
+/// Why a fresh login is not used yet: a saved token file takes precedence.
+fn token_file_notice(token_file: Option<&Path>) -> Option<String> {
+    let file = token_file.filter(|file| file.is_file())?;
+    Some(format!(
+        "{} still takes precedence over this login. Adopt its requester to this machine in \
+         Settings and move the file away to use the login.",
+        file.display()
+    ))
 }
 
 /// `roger logout`: revokes the saved login where it was issued, then deletes it.
@@ -732,5 +738,20 @@ mod tests {
     fn missing_body_file_is_an_error() {
         let got = read_body(Path::new("/nonexistent/roger-body.md"));
         assert!(matches!(got, Err(Error::BodyFile { .. })));
+    }
+
+    #[test]
+    fn login_warns_only_when_a_token_file_would_win() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = std::env::temp_dir().join(format!("roger-cli-notice-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let file = dir.join("token");
+        assert_eq!(token_file_notice(Some(&file)), None);
+        assert_eq!(token_file_notice(None), None);
+        std::fs::write(&file, "roger_x\n")?;
+        let notice = token_file_notice(Some(&file)).ok_or("no notice")?;
+        assert!(notice.starts_with(&format!("{} still takes precedence", file.display())));
+        assert!(notice.contains("Adopt its requester"));
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
     }
 }

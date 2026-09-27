@@ -825,22 +825,50 @@ async function addPasskey() {
 
 // ---- Settings --------------------------------------------------------------------
 
+/** Pages of machines and requesters loaded so far in Settings. */
+const settingsPages = {
+  /** @type {MachineView[]} */ machines: [],
+  /** @type {string | null} */ machinesNext: null,
+  /** @type {RequesterView[]} */ requesters: [],
+  /** @type {string | null} */ requestersNext: null,
+};
+
+/** @param {string} path @param {string | null} after */
+function paged(path, after) {
+  return api(
+    "GET",
+    after ? `${path}?after=${encodeURIComponent(after)}` : path,
+  );
+}
+
 /**
- * @param {MachineView[]} [shown] Machines already listed, to append the next page to.
- * @param {string | null} [after] Cursor of the next page of machines.
+ * Renders Settings from the first pages, or after loading one more page of
+ * machines or requesters.
+ * @param {"first" | "machines" | "requesters"} [load]
  */
-async function renderSettings(shown = [], after = null) {
+async function renderSettings(load = "first") {
   const me = state.me;
   if (!me) return;
-  /** @type {[{ requesters: RequesterView[], truncated: boolean }, { machines: MachineView[], next: string | null }]} */
-  const [{ requesters, truncated }, page] = await Promise.all([
-    api("GET", "/v1/inbox/requesters"),
-    api(
-      "GET",
-      `/v1/inbox/machines${after ? `?after=${encodeURIComponent(after)}` : ""}`,
-    ),
-  ]);
-  const machines = [...shown, ...page.machines];
+  const pages = settingsPages;
+  if (load === "first") {
+    const [r, m] = await Promise.all([
+      paged("/v1/inbox/requesters", null),
+      paged("/v1/inbox/machines", null),
+    ]);
+    pages.requesters = r.requesters;
+    pages.requestersNext = r.next;
+    pages.machines = m.machines;
+    pages.machinesNext = m.next;
+  } else if (load === "machines") {
+    const m = await paged("/v1/inbox/machines", pages.machinesNext);
+    pages.machines = [...pages.machines, ...m.machines];
+    pages.machinesNext = m.next;
+  } else {
+    const r = await paged("/v1/inbox/requesters", pages.requestersNext);
+    pages.requesters = [...pages.requesters, ...r.requesters];
+    pages.requestersNext = r.next;
+  }
+  const { machines, requesters } = pages;
   const topic = /** @type {HTMLInputElement} */ (
     el("input", {
       value: me.ntfyTopic ?? "",
@@ -991,13 +1019,10 @@ async function renderSettings(shown = [], after = null) {
             { class: "none" },
             "No machine is logged in. Run roger login on one.",
           ),
-      page.next
+      pages.machinesNext
         ? el(
             "button",
-            {
-              class: "quiet",
-              onclick: () => void renderSettings(machines, page.next),
-            },
+            { class: "quiet", onclick: () => void renderSettings("machines") },
             "More machines",
           )
         : null,
@@ -1011,7 +1036,6 @@ async function renderSettings(shown = [], after = null) {
         {},
         "Requesters with their own token, for automations that do not use roger login. Its Asks come to you unless they name someone with --to. Only you can issue or revoke its tokens. Adopt one to a logged-in machine to keep it there under --as <name>; its tokens keep working.",
       ),
-      truncated ? el("p", { class: "none" }, "Showing the first 100.") : null,
       el(
         "table",
         {},
@@ -1085,6 +1109,16 @@ async function renderSettings(shown = [], after = null) {
           ),
         ),
       ),
+      pages.requestersNext
+        ? el(
+            "button",
+            {
+              class: "quiet",
+              onclick: () => void renderSettings("requesters"),
+            },
+            "More requesters",
+          )
+        : null,
       el(
         "div",
         { class: "inline-form" },

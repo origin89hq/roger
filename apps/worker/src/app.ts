@@ -49,6 +49,7 @@ import {
   machineRef,
   newRequester,
   notificationSettings,
+  requesterCursor,
   requesterName,
 } from "./schemas.ts";
 import type { Requester, Responder, Store, TransitionResult } from "./store.ts";
@@ -80,6 +81,7 @@ const SESSION_COOKIE = "__Host-roger";
 const OAUTH_COOKIE = "__Host-roger-oauth";
 const INBOX_LIMIT = 200;
 const HISTORY_LIMIT = 50;
+const REQUESTER_PAGE = 100;
 /** The CLI sends this with `roger login`, and any OAuth client can send it. */
 const DEVICE_CLIENT_ID = "roger-cli";
 const DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code";
@@ -771,9 +773,18 @@ export function createApp(svc: Services): Hono<Env> {
     return new Response(null, { status: 201 });
   });
 
-  inbox.get("/requesters", async (c) =>
-    json(await svc.accounts.requesters(c.get("responder").githubId, 100)),
-  );
+  inbox.get("/requesters", async (c) => {
+    const query = requesterCursor.safeParse(c.req.query());
+    if (!query.success)
+      return failure(400, "invalid_request", describeIssues(query.error));
+    return json(
+      await svc.accounts.requesters(
+        c.get("responder").githubId,
+        REQUESTER_PAGE,
+        query.data.after ?? null,
+      ),
+    );
+  });
 
   inbox.post("/requesters", async (c) => {
     const body = await parse(c.req.raw, LIMITS.adminBytes, newRequester);

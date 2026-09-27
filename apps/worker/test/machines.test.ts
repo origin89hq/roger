@@ -390,6 +390,36 @@ describe("device authorization", () => {
     );
   });
 
+  it("replaces by issuance order, not by id order", async () => {
+    const svc = services();
+    const me = await person(svc);
+    const studio = await login(svc, me);
+    const newer = await login(svc, me, studio.name);
+    // Ids from different isolates can sort opposite to issuance; make them.
+    await env.DB.prepare(
+      "UPDATE machines SET id = '00000000000000000000000000' WHERE hash = ?",
+    )
+      .bind(await sha256(newer.credential))
+      .run();
+    expect((await agent(svc, newer.credential, "GET", "/v1/asks")).status).toBe(
+      200,
+    );
+    expect(
+      (await agent(svc, studio.credential, "GET", "/v1/asks")).status,
+    ).toBe(401);
+    // The old login, used first, never revokes the newer one.
+    const third = await login(svc, me, studio.name);
+    expect((await agent(svc, newer.credential, "GET", "/v1/asks")).status).toBe(
+      200,
+    );
+    expect((await agent(svc, third.credential, "GET", "/v1/asks")).status).toBe(
+      200,
+    );
+    expect((await agent(svc, newer.credential, "GET", "/v1/asks")).status).toBe(
+      401,
+    );
+  });
+
   it("keeps each machine name to one person, and a new login replaces the owner's old one", async () => {
     const svc = services();
     const me = await person(svc);
@@ -457,7 +487,7 @@ describe("device authorization", () => {
     expect((await approve(other.cookie, theirs.user_code)).status).toBe(409);
     // Had both passed the check, the index refuses the second credential.
     await env.DB.prepare(
-      "INSERT INTO machines (id, name, owner, hash, created_at) VALUES (?, ?, ?, ?, 0)",
+      "INSERT INTO machines (id, name, owner, hash, generation, created_at) VALUES (?, ?, ?, ?, 1, 0)",
     )
       .bind(crypto.randomUUID(), name, other.githubId, crypto.randomUUID())
       .run();
@@ -975,14 +1005,41 @@ describe("machine names", () => {
     );
     expect((await mine.json<Ask>()).requester).toBe(`${studio.name}/job`);
 
-    // The first owner's requester is renamed, listed in their Settings, and
-    // reachable with a token they issue.
-    const listed = await (
-      await browser(svc, first.cookie, "GET", "/v1/inbox/requesters")
-    ).json<{
-      requesters: { id: string; name: string; machine: string | null }[];
-    }>();
-    const moved = listed.requesters.find((r) =>
+    // The first owner's requester is renamed, listed in their Settings past
+    // 100 requesters that sort before it, and reachable with a token they issue.
+    await env.DB.batch(
+      Array.from({ length: 100 }, (_, i) =>
+        env.DB.prepare(
+          `INSERT INTO requesters (id, name, pickup_minutes, completion_minutes, created_by, created_at)
+           VALUES (?, ?, 1, 1, ?, 0)`,
+        ).bind(
+          `${studio.name}-a-${i}`,
+          `a-${studio.name}-${i}`,
+          first.githubId,
+        ),
+      ),
+    );
+    const everyone: { id: string; name: string; machine: string | null }[] = [];
+    let after: string | null = null;
+    for (;;) {
+      const page: {
+        requesters: { id: string; name: string; machine: string | null }[];
+        next: string | null;
+      } = await (
+        await browser(
+          svc,
+          first.cookie,
+          "GET",
+          `/v1/inbox/requesters${after ? `?after=${encodeURIComponent(after)}` : ""}`,
+        )
+      ).json();
+      expect(page.requesters.length).toBeLessThanOrEqual(100);
+      everyone.push(...page.requesters);
+      if (!page.next) break;
+      after = page.next;
+    }
+    expect(everyone).toHaveLength(101);
+    const moved = everyone.find((r) =>
       r.name.startsWith(`${studio.name}/job#`),
     );
     expect(moved?.machine).toBeNull();
@@ -1010,7 +1067,7 @@ describe("machine names", () => {
     await env.DB.batch(
       Array.from({ length: MACHINE_PAGE + 1 }, (_, i) =>
         env.DB.prepare(
-          "INSERT INTO machines (id, name, owner, hash, replacing, created_at) VALUES (?, ?, ?, ?, 0, 0)",
+          "INSERT INTO machines (id, name, owner, hash, generation, replacing, created_at) VALUES (?, ?, ?, ?, 1, 0, 0)",
         ).bind(
           `01K6A${String(i).padStart(21, "0")}`,
           `${prefix}-${i}`,

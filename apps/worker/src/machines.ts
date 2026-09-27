@@ -203,8 +203,12 @@ export class Machines {
     const [insert] = await this.db.batch([
       this.db
         .prepare(
-          `INSERT INTO machines (id, name, owner, hash, created_at)
-           SELECT ?1, d.machine, d.owner, ?2, ?3 FROM device_codes d
+          `INSERT INTO machines (id, name, owner, hash, generation, created_at)
+           SELECT ?1, d.machine, d.owner, ?2,
+                  1 + coalesce((SELECT max(generation) FROM machines g
+                                WHERE g.owner = d.owner AND g.name = d.machine), 0),
+                  ?3
+           FROM device_codes d
            WHERE d.id = ?4 AND d.state = 'approved' AND d.expires_at > ?3
              AND NOT EXISTS (SELECT 1 FROM machines m WHERE m.name = d.machine
                                AND m.owner <> d.owner AND m.revoked_at IS NULL)`,
@@ -362,25 +366,26 @@ export class Machines {
 
   /**
    * The machine a credential belongs to. Its first use revokes the owner's
-   * older machines of the same name, so a login that is never collected or
-   * saved leaves the previous one working.
+   * earlier generations of the same name, so a login that is never collected
+   * or saved leaves the previous one working. Generations come from the
+   * database, not from ids, which only increase within one isolate.
    */
   async byCredential(credential: string, now: number): Promise<Machine | null> {
     const row = await this.db
       .prepare(
-        "SELECT id, name, owner, replacing FROM machines WHERE hash = ? AND revoked_at IS NULL",
+        "SELECT id, name, owner, generation, replacing FROM machines WHERE hash = ? AND revoked_at IS NULL",
       )
       .bind(await sha256(credential))
-      .first<Machine & { replacing: number }>();
+      .first<Machine & { generation: number; replacing: number }>();
     if (!row) return null;
     if (row.replacing) {
       await this.db.batch([
         this.db
           .prepare(
             `UPDATE machines SET revoked_at = ?
-             WHERE owner = ? AND name = ? AND id < ? AND revoked_at IS NULL`,
+             WHERE owner = ? AND name = ? AND generation < ? AND revoked_at IS NULL`,
           )
-          .bind(now, row.owner, row.name, row.id),
+          .bind(now, row.owner, row.name, row.generation),
         this.db
           .prepare("UPDATE machines SET replacing = 0 WHERE id = ?")
           .bind(row.id),

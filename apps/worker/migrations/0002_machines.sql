@@ -4,17 +4,20 @@
 -- A logged-in machine. Its credential acts as any of the owner's requesters
 -- whose `machine` is this name. An active name belongs to one person.
 CREATE TABLE machines (
-  id            TEXT PRIMARY KEY,          -- ULID; later logins sort after earlier ones
+  id            TEXT PRIMARY KEY,          -- ULID
   name          TEXT NOT NULL,             -- chosen when approving, such as studio
   owner         INTEGER NOT NULL REFERENCES responders(github_id),
   hash          TEXT NOT NULL UNIQUE,      -- SHA-256 of the credential; shown once
+  generation    INTEGER NOT NULL,          -- per owner and name, assigned in the issuing
+                                           -- statement: 1 more than any earlier login
   replacing     INTEGER NOT NULL DEFAULT 1, -- 1 until first used; that use revokes the
-                                           -- owner's older machines of the same name
+                                           -- owner's lower generations of the same name
   created_at    INTEGER NOT NULL,
   revoked_at    INTEGER
 );
 CREATE INDEX machines_active ON machines (name, owner) WHERE revoked_at IS NULL;
 CREATE INDEX machines_by_owner ON machines (owner, name) WHERE revoked_at IS NULL;
+CREATE INDEX machines_generations ON machines (owner, name, generation);
 
 -- A pending `roger login`. Expired rows are deleted as new logins start and by the sweep.
 CREATE TABLE device_codes (

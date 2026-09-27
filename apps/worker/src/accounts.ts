@@ -233,21 +233,24 @@ export class Accounts {
   }
 
   /**
-   * The requesters `owner` created, enabled first, at most `limit`, each with
-   * its 20 most recent tokens. `truncated` says whether more exist.
+   * A page of the requesters `owner` created that are not a machine's own,
+   * by name, at most `limit`, each with its 20 most recent tokens. Pass
+   * `next` as `after` for the following page; `null` on the last.
    */
   async requesters(
     owner: number,
     limit: number,
-  ): Promise<{ requesters: RequesterView[]; truncated: boolean }> {
+    after: string | null,
+  ): Promise<{ requesters: RequesterView[]; next: string | null }> {
     const listed = await this.db
       .prepare(
         `SELECT r.*, p.login AS created_by_login FROM requesters r
          LEFT JOIN responders p ON p.github_id = r.created_by
          WHERE r.created_by = ? AND (instr(r.name, '/') = 0 OR r.machine IS NULL)
-         ORDER BY r.disabled_at IS NOT NULL, r.name LIMIT ?`,
+           AND r.name > ?
+         ORDER BY r.name LIMIT ?`,
       )
-      .bind(owner, limit + 1)
+      .bind(owner, after ?? "", limit + 1)
       .all();
     const page = listed.results.slice(0, limit);
     const tokens = await this.db
@@ -284,7 +287,10 @@ export class Accounts {
       byRequester.set(t.requester_id, list);
     }
     return {
-      truncated: listed.results.length > limit,
+      next:
+        listed.results.length > limit
+          ? ((page.at(-1) as { name: string } | undefined)?.name ?? null)
+          : null,
       requesters: (page as Row[]).map((r) => ({
         id: r.id,
         name: r.name,
