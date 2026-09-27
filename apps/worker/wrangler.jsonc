@@ -9,9 +9,11 @@
     {
       "binding": "DB",
       "database_name": "roger",
+      "database_id": "bbbc1e04-91fd-4323-a98a-e2085594d48a",
       "migrations_dir": "migrations"
     }
   ],
+  "routes": [{ "pattern": "roger.origin89.com", "custom_domain": true }],
   // The inbox page and its script. API and sign-in routes run the Worker first.
   "assets": {
     "directory": "public",
@@ -27,7 +29,7 @@
     "APP_ORIGIN": "https://roger.origin89.com",
     "GITHUB_CLIENT_ID": "",
     "GITHUB_ORG": "origin89hq",
-    "GITHUB_TEAM": "roger-responders",
+    "GITHUB_TEAM": "working-group",
     "NTFY_URL": "https://ntfy.sh",
     "TIME_ZONE": "America/Toronto",
     "WORK_DAYS": "mon-fri",
