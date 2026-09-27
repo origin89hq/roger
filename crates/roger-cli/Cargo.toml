@@ -1,0 +1,27 @@
+[package]
+name = "roger-cli"
+version = "0.1.0"
+description = "The `roger` command: agents ask a person for a decision and read the answer."
+readme = "README.md"
+keywords = ["agents", "approval", "human-in-the-loop", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "roger"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+roger-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ureq.workspace = true
+
+[lints]
+workspace = true

@@ -31,6 +31,11 @@ jobs:
             0BSD, Apache-2.0, BlueOak-1.0.0, BSD-2-Clause, BSD-3-Clause,
             CC-BY-4.0, CC0-1.0, ISC, MIT, MPL-2.0, Python-2.0, Unicode-3.0,
             Unlicense, Zlib
+          # webpki-roots is Mozilla's CA list under CDLA-Permissive-2.0, a
+          # permissive data licence; @origin89/brand is our own package, whose
+          # marks are under its LICENSE.md terms.
+          allow-dependencies-licenses: >-
+            pkg:cargo/webpki-roots, pkg:npm/%40origin89/brand
 
   zizmor:
     runs-on: ubuntu-latest

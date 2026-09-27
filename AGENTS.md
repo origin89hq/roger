@@ -33,17 +33,23 @@ answer back to the requester. The design is the
 [Roger RFC](https://github.com/origin89hq/roger/issues/1);
 update it when a decision there changes.
 
-Planned layout, created as code lands:
+Layout:
 
 ```text
-apps/worker/            Cloudflare Worker (Hono, Zod): API, D1, Durable Object per open Ask, web inbox
-crates/roger-protocol/  Ask, Answer, and error types; TypeScript is generated from here
-crates/roger-cli/       `roger` binary: login, ask, wait, answer, inbox, tokens
+apps/worker/            Cloudflare Worker (Hono, Zod, D1): agent API, web inbox, sign-in, cron
+crates/roger-protocol/  Ask, Answer, trace, and error types; generates apps/worker/src/protocol.gen.ts
+crates/roger-cli/       `roger` binary for agents: ask, get, wait, list, withdraw, trace
 ```
 
-Run `just check` before pushing. It runs Biome, then typecheck, test, and build
-in every workspace package. Add the Rust checks from engineering's
-`templates/just/rust.justfile` along with the first crate.
+Run `just check` before pushing. It runs the Rust checks, then Biome, typecheck,
+test, and build in every workspace package. After changing a type in
+`roger-protocol`, run `just protocol`; the Rust tests fail while the generated
+TypeScript is stale, and the Worker's typecheck fails while its Zod schemas
+disagree with it.
+
+Each Ask is addressed to one person (`to`, a GitHub login, defaulting to the
+person who created the requester). Only that person sees it, answers it, and
+receives its pushes.
 
 Roger records decisions and never acts on them. Do not give the Worker GitHub
 write access, Orca access, deploy credentials, or any other effect; requesters

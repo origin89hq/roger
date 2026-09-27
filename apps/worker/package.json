@@ -1,0 +1,24 @@
+{
+  "name": "roger-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/brand.mjs && wrangler dev --port 8792 --local-upstream localhost:8792",
+    "typecheck": "wrangler types && tsc --noEmit && tsc --noEmit -p public",
+    "test": "vitest run",
+    "build": "node scripts/brand.mjs && wrangler deploy --dry-run --outdir dist"
+  },
+  "license": "MIT OR Apache-2.0",
+  "dependencies": {
+    "@simplewebauthn/server": "14.0.3",
+    "hono": "4.13.9",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.22.0",
+    "@origin89/brand": "0.6.0",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11",
+    "wrangler": "4.141.0"
+  }
+}
