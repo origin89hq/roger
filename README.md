@@ -14,7 +14,7 @@ roger ask --kind approval --priority p1 \
   --option approve --option reject --wait
 ```
 
-Status: design only. The design is in the internal [Roger RFC](https://github.com/origin89hq/internal-research/issues/2).
+Status: design only. The design is in the [Roger RFC](https://github.com/origin89hq/roger/issues/1).
 
 ## Development
 

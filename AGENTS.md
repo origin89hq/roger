@@ -30,7 +30,7 @@ Finish authorized fixes instead of replacing them with backlog issues.
 
 Roger holds requests from agents ("Asks") in one priority inbox and hands each
 answer back to the requester. The design is the
-[Roger RFC](https://github.com/origin89hq/internal-research/issues/2);
+[Roger RFC](https://github.com/origin89hq/roger/issues/1);
 update it when a decision there changes.
 
 Planned layout, created as code lands:
