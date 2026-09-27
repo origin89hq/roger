@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Roger</title>
+    <link rel="icon" href="/brand/icons/favicon.ico" />
+    <link rel="stylesheet" href="/brand/tokens/themes.css" />
+    <link rel="stylesheet" href="/inbox.css" />
+    <script type="module" src="/inbox.js"></script>
+  </head>
+  <body>
+    <header class="bar">
+      <a class="brand" href="/" aria-label="Roger inbox">
+        <img src="/brand/logos/plate-89-blue.svg" alt="" width="28" height="28" />
+        <span>Roger</span>
+      </a>
+      <nav id="nav" hidden>
+        <a href="#inbox" data-view="inbox">Inbox</a>
+        <a href="#history" data-view="history">History</a>
+        <a href="#settings" data-view="settings">Settings</a>
+        <span id="who" class="who"></span>
+        <button type="button" id="logout" class="quiet">Sign out</button>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section id="signed-out" class="empty" hidden>
+        <h1>Roger</h1>
+        <p>Requests from agents that need a person, in one inbox.</p>
+        <a class="plate" href="/auth/login">Sign in with GitHub</a>
+      </section>
+
+      <section id="inbox-view" class="split" hidden>
+        <div class="list" id="list" role="listbox" aria-label="Asks"></div>
+        <article class="detail" id="detail" aria-live="polite"></article>
+      </section>
+
+      <section id="history-view" class="split" hidden>
+        <div class="list" id="history-list" role="listbox" aria-label="History"></div>
+        <article class="detail" id="history-detail"></article>
+      </section>
+
+      <section id="settings-view" class="settings" hidden></section>
+    </main>
+
+    <p id="status" class="status" role="status" hidden></p>
+
+    <dialog id="help">
+      <h2>Keyboard</h2>
+      <dl>
+        <dt>j / k</dt><dd>Next or previous Ask</dd>
+        <dt>1–8</dt><dd>Choose an option that does not approve</dd>
+        <dt>i</dt><dd>Write instructions</dd>
+        <dt>g i / g h / g s</dt><dd>Inbox, history, settings</dd>
+        <dt>?</dt><dd>This help</dd>
+      </dl>
+      <p>Approving always asks for your passkey.</p>
+      <form method="dialog"><button type="submit" class="quiet">Close</button></form>
+    </dialog>
+  </body>
+</html>

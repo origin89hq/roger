@@ -1,0 +1,6 @@
+# Copy to .dev.vars for `just dev`. Local sign-in needs a GitHub OAuth app whose
+# callback is http://localhost:8792/auth/callback.
+APP_ORIGIN=http://localhost:8792
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+NTFY_URL=

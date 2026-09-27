@@ -1,0 +1,37 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "roger",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-22",
+  "workers_dev": false,
+  "preview_urls": false,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "roger",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // The inbox page and its script. API and sign-in routes run the Worker first.
+  "assets": {
+    "directory": "public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/v1/*", "/auth/*"]
+  },
+  // Expiry, delayed pushes, the morning digest, and retention.
+  "triggers": { "crons": ["*/5 * * * *"] },
+  // GITHUB_CLIENT_SECRET and NTFY_TOKEN are Worker secrets. Each responder sets
+  // their own ntfy topic in the inbox; an empty NTFY_URL disables pushes.
+  "secrets": { "required": ["GITHUB_CLIENT_SECRET"] },
+  "vars": {
+    "APP_ORIGIN": "https://roger.origin89.com",
+    "GITHUB_CLIENT_ID": "",
+    "GITHUB_ORG": "origin89hq",
+    "GITHUB_TEAM": "roger-responders",
+    "NTFY_URL": "https://ntfy.sh",
+    "TIME_ZONE": "America/Toronto",
+    "WORK_DAYS": "mon-fri",
+    "WORK_HOURS": "08:00-18:00"
+  },
+  "observability": { "enabled": true, "head_sampling_rate": 1 }
+}
