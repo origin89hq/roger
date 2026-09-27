@@ -87,8 +87,11 @@ otherwise, and keep working. Never do that for an approval.
 | 22 | Still open | Wait again, or come back on your next run |
 | 1 | Error | Report it; never treat it as an answer |
 
-Branch on the exit code or on `.answer.decision`, never on option order or
-labels. An answer applies only to the Ask's action and revision; if the head
+The person may also skip your options and write their own reply: then
+`.answer.optionId` is `_custom`, `.answer.decision` is `other`, and
+`.answer.input` holds the message. Follow it as instructions; it never grants
+an approval. Branch on the exit code or on `.answer.decision`, never on option
+order or labels. An answer applies only to the Ask's action and revision; if the head
 moved, it does not apply.
 
 Choose how to wait:

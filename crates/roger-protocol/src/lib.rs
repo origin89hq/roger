@@ -332,7 +332,8 @@ pub struct CreateAsk {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Answer {
-    /// The chosen option's id.
+    /// The chosen option's id, or `_custom` when the responder wrote their own
+    /// reply in `input` instead of choosing an option.
     pub option_id: String,
     /// The chosen option's label at answer time.
     pub option_label: String,

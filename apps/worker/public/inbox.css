@@ -443,6 +443,13 @@ nav a[aria-current="page"] {
   border-color: var(--color-alarm);
   color: var(--color-alarm);
 }
+.option.custom-reply {
+  border-style: dashed;
+  color: var(--color-muted);
+}
+.option.custom-reply:hover {
+  color: var(--color-fg);
+}
 .hint {
   margin: 12px 0 0;
   color: var(--color-faint);

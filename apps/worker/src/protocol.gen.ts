@@ -16,7 +16,10 @@ export type Action = {
 
 /**  A person's answer. Immutable once recorded. */
 export type Answer = {
-	/**  The chosen option's id. */
+	/**
+	 *  The chosen option's id, or `_custom` when the responder wrote their own
+	 *  reply in `input` instead of choosing an option.
+	 */
 	optionId: string,
 	/**  The chosen option's label at answer time. */
 	optionLabel: string,

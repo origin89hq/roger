@@ -409,6 +409,18 @@ function renderDetail(ask) {
   pane.closest(".split")?.classList.add("showing");
 }
 
+/**
+ * The answer every Ask accepts: the responder's own message instead of an
+ * option. The Worker records it as an `other` decision, never an approval.
+ * @type {AskOption}
+ */
+const CUSTOM_REPLY = {
+  id: "_custom",
+  label: "Custom reply",
+  decision: "other",
+  inputRequired: true,
+};
+
 /** @param {Ask} ask */
 function answerForm(ask) {
   const needsInput = ask.options.some((o) => o.inputRequired);
@@ -443,6 +455,22 @@ function answerForm(ask) {
       option.inputRequired ? " …" : "",
     );
   });
+  buttons.push(
+    el(
+      "button",
+      {
+        class: "option custom-reply",
+        "data-key": "r",
+        title: "Answer with only the message above; never an approval",
+        onclick: (e) => {
+          const target = /** @type {HTMLButtonElement} */ (e.currentTarget);
+          void submitAnswer(ask, CUSTOM_REPLY, input.value, target);
+        },
+      },
+      el("kbd", {}, "r"),
+      "Send my message instead",
+    ),
+  );
   const hasApprove = ask.options.some((o) => o.decision === "approve");
   return el(
     "section",
@@ -604,7 +632,12 @@ async function select(id) {
 async function submitAnswer(ask, option, text, button) {
   const input = text.trim() || null;
   if (option.inputRequired && !input) {
-    notify(`"${option.label}" needs instructions.`, true);
+    notify(
+      option.id === CUSTOM_REPLY.id
+        ? "Write your message first."
+        : `"${option.label}" needs instructions.`,
+      true,
+    );
     $("answer-input").focus();
     return;
   }
@@ -1069,6 +1102,11 @@ document.addEventListener("keydown", (event) => {
     case "i":
       document.getElementById("answer-input")?.focus();
       event.preventDefault();
+      break;
+    case "r":
+      /** @type {HTMLButtonElement | null} */ (
+        document.querySelector('.options button[data-key="r"]')
+      )?.click();
       break;
     case "g":
       pendingG = true;

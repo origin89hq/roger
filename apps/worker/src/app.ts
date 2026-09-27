@@ -8,7 +8,7 @@ import { failure, json, jsonBody } from "./http.ts";
 import { canonicalJson, secret, sha256 } from "./ids.ts";
 import { askPush, type Notifier, passkeyAddedPush } from "./notify.ts";
 import type { Passkeys } from "./passkeys.ts";
-import type { Ask, AskList, EventList } from "./protocol.gen.ts";
+import type { Ask, AskList, AskOption, EventList } from "./protocol.gen.ts";
 import {
   type AnswerRequest,
   answer,
@@ -44,6 +44,18 @@ const DEFAULT_PICKUP_MINUTES = 120;
 const DEFAULT_COMPLETION_MINUTES = 24 * 60;
 const INBOX_LIMIT = 200;
 const HISTORY_LIMIT = 50;
+
+/**
+ * An answer every Ask accepts: the responder's own message instead of one of
+ * the requester's options. It is never an approval. Requester option ids
+ * cannot start with `_`, so it cannot collide with one.
+ */
+const CUSTOM_REPLY: AskOption = {
+  id: "_custom",
+  label: "Custom reply",
+  decision: "other",
+  inputRequired: true,
+};
 
 async function parse<S extends z.ZodType>(
   request: Request,
@@ -364,7 +376,10 @@ export function createApp(svc: Services): Hono<Env> {
           ask.state,
         ),
       };
-    const option = ask.options.find((o) => o.id === request.option);
+    const option =
+      request.option === CUSTOM_REPLY.id
+        ? CUSTOM_REPLY
+        : ask.options.find((o) => o.id === request.option);
     if (!option)
       return { error: failure(400, "invalid_request", "No such option.") };
     const input = request.input?.trim() || null;
