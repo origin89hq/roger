@@ -1,6 +1,6 @@
 [package]
 name = "roger-protocol"
-version = "0.1.0"
+version = "0.1.1"
 description = "Wire types of the Roger API: Asks, answers, traces, and errors."
 keywords = ["agents", "approval", "human-in-the-loop"]
 edition.workspace = true
