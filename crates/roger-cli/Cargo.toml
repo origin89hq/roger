@@ -1,6 +1,6 @@
 [package]
 name = "roger-cli"
-version = "0.1.0"
+version = "0.1.1"
 description = "The `roger` command: agents ask a person for a decision and read the answer."
 readme = "README.md"
 keywords = ["agents", "approval", "human-in-the-loop", "cli"]
