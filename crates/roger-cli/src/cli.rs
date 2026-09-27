@@ -155,20 +155,42 @@ pub struct ListArgs {
     /// Open Asks.
     #[arg(long)]
     pub open: bool,
+    /// Only decision keys starting with this, such as `spec:`.
+    #[arg(long)]
+    pub prefix: Option<String>,
+    /// Only Asks about this repository, as `owner/name`.
+    #[arg(long)]
+    pub repo: Option<String>,
+    /// `json` prints `{"asks": [...]}` with full Asks; `brief` prints one
+    /// compact JSON object per line (id, key, title, repo, links, answer,
+    /// progress).
+    #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+    pub format: ListFormat,
+}
+
+/// Output of `roger list`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ListFormat {
+    /// Full Asks in one JSON document.
+    Json,
+    /// One compact line per Ask.
+    Brief,
 }
 
 #[derive(Debug, Args)]
 pub struct TraceArgs {
     pub id: AskId,
-    /// `dispatched`, `progress`, `applied`, `failed`, or `not_applicable`.
+    /// `dispatched`, `progress`, `applied`, `failed`, `not_applicable`, or
+    /// `corrected` (fixes the evidence link of an earlier terminal event).
     pub event: ReportedEvent,
     /// `key=value`, such as `orca.run=r_81`; repeatable.
     #[arg(long = "ref", value_parser = parse_ref)]
     pub refs: Vec<(String, String)>,
-    /// Evidence link. Required for applied and failed.
+    /// Evidence link. Required for applied, failed, and corrected. A comment
+    /// link must be on an issue or PR this Ask links or targets.
     #[arg(long)]
     pub url: Option<String>,
-    /// Short explanation. Required for failed.
+    /// Short explanation. Required for failed and corrected.
     #[arg(long)]
     pub note: Option<String>,
 }

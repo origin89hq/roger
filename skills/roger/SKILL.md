@@ -101,8 +101,11 @@ Choose how to wait:
   block for longer.
 - **Across runs**, for everything else: record the Ask id with the parked
   work, end the run, and on each later run read
-  `roger list --answered --unfinished`. It returns every answered Ask of your
-  requester that you have not finished.
+  `roger list --answered --unfinished --prefix <your key prefix> --format brief`. It
+  prints one line per answered Ask of your requester that you have not
+  finished: id, decision key, title, links, the decision, option, input, and
+  the latest trace event. Filter by your own prefix so you never act on
+  another job's Asks; `--repo <owner/name>` narrows further.
 
 ## Report what happened
 
@@ -120,6 +123,16 @@ End every answered Ask with exactly one of `applied`, `failed`, or
 `not_applicable`; until you do, `list --answered --unfinished` returns it and
 the inbox shows it as stalled. Acting must be safe to repeat: you may crash
 after acting and before tracing, so check first (is the PR already merged?).
+
+Trace one Ask at a time, right after the step it records, with the URL that
+step returned (the comment `gh` just created, the merge commit you just made).
+Never build a list of Asks and a list of URLs and pair them up: one shifted
+pairing records every decision against the wrong evidence. Roger refuses a
+comment link on an issue or PR the Ask does not link or target, and
+`roger trace` prints the decision key and title it recorded on stderr: check
+them. If a terminal event already carries a wrong link, add
+`roger trace <id> corrected --url <right link> --note "<what was wrong>"`;
+the original stays in the history.
 
 ## Integrations
 

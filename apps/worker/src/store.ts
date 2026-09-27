@@ -269,9 +269,15 @@ export class Store {
    */
   async listForRequester(
     requesterId: string,
-    state: AskState,
-    unfinished: boolean,
-    after: string | null,
+    filter: {
+      state: AskState;
+      unfinished: boolean;
+      after: string | null;
+      /** Only decision keys starting with this. */
+      prefix: string | null;
+      /** Only Asks about this `owner/name`, case-insensitive. */
+      repo: string | null;
+    },
     limit: number,
   ): Promise<{ asks: Ask[]; next: string | null }> {
     const rows = await this.db
@@ -280,9 +286,19 @@ export class Store {
          WHERE a.requester_id = ?1 AND a.state = ?2 AND a.id > ?3
            AND (?4 = 0 OR NOT EXISTS (
              SELECT 1 FROM trace t WHERE t.ask_id = a.id AND t.event IN ${TERMINAL}))
+           AND (?6 IS NULL OR substr(a.decision_key, 1, length(?6)) = ?6)
+           AND (?7 IS NULL OR lower(a.repo) = lower(?7))
          ORDER BY a.id LIMIT ?5`,
       )
-      .bind(requesterId, state, after ?? "", unfinished ? 1 : 0, limit + 1)
+      .bind(
+        requesterId,
+        filter.state,
+        filter.after ?? "",
+        filter.unfinished ? 1 : 0,
+        limit + 1,
+        filter.prefix,
+        filter.repo,
+      )
       .all<AskRow>();
     const page = rows.results.slice(0, limit);
     const asks = (await this.hydrate(page)).map((s) => s.ask);
@@ -687,7 +703,8 @@ export class Store {
         .prepare(
           `INSERT INTO trace (id, ask_id, event, refs, url, note, at)
            SELECT ?1, ask_id, ?2, ?3, ?4, ?5, ?6 FROM answers WHERE ask_id = ?7
-             AND NOT EXISTS (SELECT 1 FROM trace WHERE ask_id = ?7 AND event IN ${TERMINAL})
+             AND (EXISTS (SELECT 1 FROM trace WHERE ask_id = ?7 AND event IN ${TERMINAL}))
+               = (?2 = 'corrected')
              AND (SELECT count(*) FROM trace WHERE ask_id = ?7) < ?8`,
         )
         .bind(
@@ -714,8 +731,12 @@ export class Store {
               t.event === "failed" ||
               t.event === "not_applicable",
           )
-        ? "The trace already has a terminal event."
-        : `The trace is full (${LIMITS.traceEvents} events).`;
+        ? entry.event === "corrected"
+          ? `The trace is full (${LIMITS.traceEvents} events).`
+          : "The trace already has a terminal event. To fix its link, record `corrected` with the right url and a note."
+        : entry.event === "corrected"
+          ? "Only a trace with a terminal event can be corrected."
+          : `The trace is full (${LIMITS.traceEvents} events).`;
     return { kind: "conflict", state: ask.state, message };
   }
 

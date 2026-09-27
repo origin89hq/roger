@@ -152,6 +152,7 @@ const reportedEvent = z.enum([
   "applied",
   "failed",
   "not_applicable",
+  "corrected",
 ]);
 
 export const appendTrace = z
@@ -173,7 +174,12 @@ export const appendTrace = z
     note: bytes(LIMITS.noteBytes).nullable().exactOptional(),
   })
   .superRefine((t, ctx) => {
-    if ((t.event === "applied" || t.event === "failed") && !t.url)
+    if (
+      (t.event === "applied" ||
+        t.event === "failed" ||
+        t.event === "corrected") &&
+      !t.url
+    )
       ctx.addIssue({
         code: "custom",
         message: `${t.event} needs an evidence url`,
@@ -185,7 +191,22 @@ export const appendTrace = z
         message: "failed needs a note with the reason",
         path: ["note"],
       });
+    if (t.event === "corrected" && !t.note)
+      ctx.addIssue({
+        code: "custom",
+        message: "corrected needs a note saying what was wrong",
+        path: ["note"],
+      });
   });
+
+/** Filters for `GET /v1/asks`. */
+export const listFilter = z.strictObject({
+  state: z.enum(["open", "answered"]).default("open"),
+  terminal: z.literal("none").optional(),
+  after: askId.optional(),
+  prefix: z.string().min(1).max(200).optional(),
+  repo: repo.optional(),
+});
 
 /** Body of the inbox's answer request. `assertion` is required for approvals. */
 export const answer = z.strictObject({

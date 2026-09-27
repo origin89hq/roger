@@ -3,6 +3,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { z } from "zod";
 import { type Accounts, SESSION_MS } from "./accounts.ts";
 import type { Config } from "./config.ts";
+import { evidenceProblem } from "./evidence.ts";
 import type { GitHub } from "./github.ts";
 import { failure, json, jsonBody } from "./http.ts";
 import { canonicalJson, secret, sha256 } from "./ids.ts";
@@ -18,6 +19,7 @@ import {
   createAsk,
   describeIssues,
   LIMITS,
+  listFilter,
   newRequester,
   notificationSettings,
 } from "./schemas.ts";
@@ -183,21 +185,20 @@ export function createApp(svc: Services): Hono<Env> {
   });
 
   agent.get("/asks", async (c) => {
-    const state = c.req.query("state") ?? "open";
-    if (state !== "open" && state !== "answered")
-      return failure(400, "invalid_request", "state must be open or answered.");
-    const terminal = c.req.query("terminal");
-    if (terminal !== undefined && terminal !== "none")
-      return failure(400, "invalid_request", "terminal must be none.");
-    const after = c.req.query("after") ?? null;
-    if (after !== null && !askId.safeParse(after).success)
-      return failure(400, "invalid_request", "after must be an Ask id.");
+    const query = listFilter.safeParse(c.req.query());
+    if (!query.success)
+      return failure(400, "invalid_request", describeIssues(query.error));
+    const { state, terminal, after, prefix, repo } = query.data;
     const now = svc.now();
     const page = await svc.store.listForRequester(
       c.get("requester").id,
-      state,
-      terminal === "none",
-      after,
+      {
+        state,
+        unfinished: terminal === "none",
+        after: after ?? null,
+        prefix: prefix ?? null,
+        repo: repo ?? null,
+      },
       LIMITS.page,
     );
     await svc.store.markDelivered(page.asks, now);
@@ -233,6 +234,10 @@ export function createApp(svc: Services): Hono<Env> {
     if (ask instanceof Response) return ask;
     const body = await parse(c.req.raw, LIMITS.traceBytes, appendTrace);
     if (!body.ok) return body.response;
+    const problem = body.value.url
+      ? evidenceProblem(ask, body.value.event, body.value.url)
+      : null;
+    if (problem) return failure(400, "invalid_request", problem);
     return transitionResponse(
       await svc.store.appendTrace(ask.id, body.value, svc.now()),
     );

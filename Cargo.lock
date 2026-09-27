@@ -289,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "roger-cli"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "clap",
  "roger-protocol",
@@ -301,7 +301,7 @@ dependencies = [
 
 [[package]]
 name = "roger-protocol"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "serde",
  "serde_json",

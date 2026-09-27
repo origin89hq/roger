@@ -35,7 +35,8 @@ When a worker escalates a decision outside its authority:
    nothing else to do.
 3. Put the Ask id and its inbox link in the run report, and keep the other
    Tasks moving. Do not wait in the coordinator's session.
-4. On each later pass, run `roger list --answered --unfinished`. For each Ask
+4. On each later pass, run
+   `roger list --answered --unfinished --prefix task: --format brief`. For each Ask
    whose decision key is one of your Tasks, start a fresh worker from the Task
    spec plus the answer (`.answer.optionId`, `.answer.input`), and trace
    `dispatched` with `--ref orca.run=<run> --ref orca.task=<task>`.
@@ -66,8 +67,8 @@ Put the Ask id in the hand-over comment. Use `sensitive` or `irreversible`
 when the diff touches a risk class, never `routine`.
 
 **Return path.** The precheck also continues when
-`roger list --answered --unfinished` returns any Ask, so answers are picked
-up even when every open PR is labelled. For each answered merge Ask:
+`roger list --answered --unfinished --prefix merge:` returns any Ask, so
+answers are picked up even when every open PR is labelled. For each answered merge Ask:
 
 - **approve**: the approval replaces only "a person with write access
   approved this head" in the risk-class rule. Re-check every other merge rule
