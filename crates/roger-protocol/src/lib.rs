@@ -160,6 +160,9 @@ wire_enum! {
         Failed = "failed",
         /// The answer no longer applies. Terminal.
         NotApplicable = "not_applicable",
+        /// Replaces the evidence link of the terminal event, which was wrong.
+        /// Only after a terminal event; the original stays in the trace.
+        Corrected = "corrected",
     }
 }
 
@@ -176,6 +179,9 @@ wire_enum! {
         Failed = "failed",
         /// The answer no longer applies. Terminal.
         NotApplicable = "not_applicable",
+        /// Replaces a wrong evidence link on the terminal event; needs a `url`
+        /// and a `note` saying what was wrong.
+        Corrected = "corrected",
     }
 }
 
@@ -187,6 +193,7 @@ impl From<ReportedEvent> for TraceEvent {
             ReportedEvent::Applied => Self::Applied,
             ReportedEvent::Failed => Self::Failed,
             ReportedEvent::NotApplicable => Self::NotApplicable,
+            ReportedEvent::Corrected => Self::Corrected,
         }
     }
 }
@@ -197,7 +204,7 @@ impl TraceEvent {
     pub const fn is_terminal(self) -> bool {
         match self {
             Self::Applied | Self::Failed | Self::NotApplicable => true,
-            Self::Delivered | Self::Dispatched | Self::Progress => false,
+            Self::Delivered | Self::Dispatched | Self::Progress | Self::Corrected => false,
         }
     }
 }

@@ -48,11 +48,15 @@ fn read_token_file(path: &Path) -> Result<String> {
 }
 
 /// Which Asks `GET /v1/asks` returns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListFilter {
     pub state: AskState,
     /// Only Asks without a terminal trace event.
     pub unfinished: bool,
+    /// Only decision keys starting with this.
+    pub prefix: Option<String>,
+    /// Only Asks about this `owner/name`.
+    pub repo: Option<String>,
 }
 
 pub struct Client {
@@ -89,7 +93,7 @@ impl Client {
         decode(response)
     }
 
-    pub fn list_page(&self, filter: ListFilter, after: Option<&str>) -> Result<AskList> {
+    pub fn list_page(&self, filter: &ListFilter, after: Option<&str>) -> Result<AskList> {
         let mut request = self
             .agent
             .get(format!("{}/v1/asks", self.base))
@@ -97,6 +101,12 @@ impl Client {
             .query("state", filter.state.as_str());
         if filter.unfinished {
             request = request.query("terminal", "none");
+        }
+        if let Some(prefix) = &filter.prefix {
+            request = request.query("prefix", prefix);
+        }
+        if let Some(repo) = &filter.repo {
+            request = request.query("repo", repo);
         }
         if let Some(after) = after {
             request = request.query("after", after);
@@ -340,8 +350,10 @@ mod tests {
         let filter = ListFilter {
             state: AskState::Answered,
             unfinished: true,
+            prefix: Some("spec:".to_owned()),
+            repo: Some("origin89hq/km43".to_owned()),
         };
-        assert_eq!(client.list_page(filter, Some("01K6"))?, page);
+        assert_eq!(client.list_page(&filter, Some("01K6"))?, page);
         let entry = AppendTrace {
             event: ReportedEvent::Applied,
             refs: std::collections::BTreeMap::from([("branch".to_owned(), "feat/x".to_owned())]),
@@ -357,7 +369,7 @@ mod tests {
         };
         assert_eq!(
             list.request_line,
-            "GET /v1/asks?state=answered&terminal=none&after=01K6 HTTP/1.1"
+            "GET /v1/asks?state=answered&terminal=none&prefix=spec%3A&repo=origin89hq%2Fkm43&after=01K6 HTTP/1.1"
         );
         assert_eq!(trace.request_line, "POST /v1/asks/abc/trace HTTP/1.1");
         assert_eq!(serde_json::from_str::<AppendTrace>(&trace.body)?, entry);

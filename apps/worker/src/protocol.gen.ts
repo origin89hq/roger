@@ -253,7 +253,12 @@ export type ReportedEvent =
 /**  The requester tried and failed. Terminal; needs a `url` and a `note`. */
 "failed" | 
 /**  The answer no longer applies. Terminal. */
-"not_applicable";
+"not_applicable" | 
+/**
+ *  Replaces a wrong evidence link on the terminal event; needs a `url`
+ *  and a `note` saying what was wrong.
+ */
+"corrected";
 
 /**  What a fresh worker needs to continue after the answer arrives. */
 export type Resume = {
@@ -319,7 +324,12 @@ export type TraceEvent =
 /**  The requester tried and failed. Terminal. */
 "failed" | 
 /**  The answer no longer applies. Terminal. */
-"not_applicable";
+"not_applicable" | 
+/**
+ *  Replaces the evidence link of the terminal event, which was wrong.
+ *  Only after a terminal event; the original stays in the trace.
+ */
+"corrected";
 
 /**  How quickly a person should see the Ask. Decides delivery. */
 export type Urgency = 

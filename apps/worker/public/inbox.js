@@ -547,6 +547,8 @@ function traceText(ask, t) {
       return "Failed";
     case "not_applicable":
       return "No longer applies";
+    case "corrected":
+      return "Link corrected";
     default:
       return t.event;
   }

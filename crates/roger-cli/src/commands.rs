@@ -6,11 +6,11 @@ use std::process::{Command as Process, Stdio};
 
 use roger_protocol::{
     Action, AppendTrace, Ask, AskList, AskOption, AskState, CreateAsk, Decision, Kind, Outcome,
-    Resume,
+    Resume, TraceEvent,
 };
 use serde::Serialize;
 
-use crate::cli::{AskArgs, Command, ListArgs, TraceArgs};
+use crate::cli::{AskArgs, Command, ListArgs, ListFormat, TraceArgs};
 use crate::client::{Client, ListFilter};
 use crate::error::{Error, Result};
 use crate::parse::{github_repo_from_remote, refs_to_map, whole_minutes};
@@ -58,8 +58,11 @@ pub fn run(client: &Client, command: Command) -> Result<u8> {
         }
         Command::List(args) => {
             let filter = list_filter(&args);
-            let asks = collect_pages(|after| client.list_page(filter, after))?;
-            print_json(&Listing { asks: &asks })?;
+            let asks = collect_pages(|after| client.list_page(&filter, after))?;
+            match args.format {
+                ListFormat::Brief => print_brief(&asks)?,
+                ListFormat::Json => print_json(&Listing { asks: &asks })?,
+            }
             Ok(0)
         }
         Command::Withdraw { id } => {
@@ -81,7 +84,13 @@ pub fn run(client: &Client, command: Command) -> Result<u8> {
                 url,
                 note,
             };
-            print_json(&client.trace(&id, &entry)?)?;
+            let ask = client.trace(&id, &entry)?;
+            // Name the Ask back, so a caller sees which decision it recorded.
+            eprintln!(
+                "roger: recorded {} on {} ({}): {}",
+                entry.event, ask.id, ask.decision_key, ask.title
+            );
+            print_json(&ask)?;
             Ok(0)
         }
     }
@@ -202,6 +211,8 @@ fn list_filter(args: &ListArgs) -> ListFilter {
             AskState::Answered
         },
         unfinished: args.unfinished,
+        prefix: args.prefix.clone(),
+        repo: args.repo.clone(),
     }
 }
 
@@ -275,6 +286,50 @@ struct Listing<'a> {
     asks: &'a [Ask],
 }
 
+/// One line of `roger list --brief`: what an agent needs to pick an Ask.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Brief<'a> {
+    pub id: &'a str,
+    pub decision_key: &'a str,
+    pub title: &'a str,
+    pub repo: Option<&'a str>,
+    pub links: Vec<&'a str>,
+    pub state: AskState,
+    pub decision: Option<Decision>,
+    pub option_id: Option<&'a str>,
+    pub input: Option<&'a str>,
+    pub progress: Option<TraceEvent>,
+}
+
+impl<'a> Brief<'a> {
+    /// The latest trace event stands for the requester's progress.
+    pub fn of(ask: &'a Ask) -> Self {
+        let answer = ask.answer.as_ref();
+        Self {
+            id: &ask.id,
+            decision_key: &ask.decision_key,
+            title: &ask.title,
+            repo: ask.repo.as_deref(),
+            links: ask.links.iter().map(|l| l.url.as_str()).collect(),
+            state: ask.state,
+            decision: answer.map(|a| a.decision),
+            option_id: answer.map(|a| a.option_id.as_str()),
+            input: answer.and_then(|a| a.input.as_deref()),
+            progress: ask.trace.last().map(|t| t.event),
+        }
+    }
+}
+
+fn print_brief(asks: &[Ask]) -> Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    for ask in asks {
+        serde_json::to_writer(&mut stdout, &Brief::of(ask))?;
+        stdout.write_all(b"\n").map_err(Error::Output)?;
+    }
+    Ok(())
+}
+
 fn print_json(value: &impl Serialize) -> Result<()> {
     let mut stdout = std::io::stdout().lock();
     serde_json::to_writer_pretty(&mut stdout, value)?;
@@ -305,6 +360,41 @@ mod tests {
                 "skills/{folder}/SKILL.md differs from crates/roger-cli/skills/{folder}/SKILL.md"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn brief_lines_carry_the_answer_and_the_latest_trace_event()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut answered = crate::test_support::ask(AskState::Answered, Some(Decision::Other));
+        answered.links = vec![roger_protocol::Link {
+            label: "Issue".to_owned(),
+            url: "https://github.com/origin89hq/km43/issues/92".to_owned(),
+        }];
+        answered.trace = vec![roger_protocol::TraceEntry {
+            id: "t1".to_owned(),
+            event: TraceEvent::Delivered,
+            refs: std::collections::BTreeMap::new(),
+            url: None,
+            note: None,
+            at: 3,
+        }];
+        let line = serde_json::to_value(Brief::of(&answered))?;
+        assert_eq!(
+            line,
+            serde_json::json!({
+                "id": answered.id, "decisionKey": answered.decision_key, "title": "Merge",
+                "repo": "origin89hq/roger", "links": ["https://github.com/origin89hq/km43/issues/92"],
+                "state": "answered", "decision": "other", "optionId": "x", "input": null,
+                "progress": "delivered"
+            })
+        );
+
+        let open = crate::test_support::ask(AskState::Open, None);
+        let line = serde_json::to_value(Brief::of(&open))?;
+        assert_eq!(line["decision"], serde_json::Value::Null);
+        assert_eq!(line["progress"], serde_json::Value::Null);
+        assert_eq!(line["links"], serde_json::json!([]));
         Ok(())
     }
 
