@@ -27,7 +27,7 @@
   "secrets": { "required": ["GITHUB_CLIENT_SECRET"] },
   "vars": {
     "APP_ORIGIN": "https://roger.origin89.com",
-    "GITHUB_CLIENT_ID": "",
+    "GITHUB_CLIENT_ID": "Ov23lia6LxrKPfmJRf5R",
     "GITHUB_ORG": "origin89hq",
     "GITHUB_TEAM": "working-group",
     "NTFY_URL": "https://ntfy.sh",

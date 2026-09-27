@@ -42,3 +42,51 @@ jobs:
       # Also fails if apps/worker/src/protocol.gen.ts is stale.
       - run: cargo test --locked --workspace
       - run: git diff --exit-code
+
+  # Deploys the current main commit to roger.origin89.com after both checks
+  # pass. The Worker's secret comes from the roger-production environment, so
+  # GitHub stays the source of truth for it.
+  deploy:
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: [package, rust]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: roger-production
+    concurrency:
+      group: roger-production
+      cancel-in-progress: false
+    env:
+      WRANGLER_SEND_METRICS: "false"
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Require the current main commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          current=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          test "$current" = "$GITHUB_SHA" || { echo 'Deploy the current main commit; this run is stale.'; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          run_install: false
+      - run: pnpm install --frozen-lockfile
+      - name: Apply D1 migrations and deploy the Worker with its secret
+        working-directory: apps/worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ROGER_GITHUB_CLIENT_SECRET: ${{ secrets.ROGER_GITHUB_CLIENT_SECRET }}
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo 'Grant this repository the organization CLOUDFLARE_API_TOKEN secret.'; exit 1; }
+          test -n "$ROGER_GITHUB_CLIENT_SECRET" || { echo 'Set ROGER_GITHUB_CLIENT_SECRET in the roger-production environment.'; exit 1; }
+          secrets="$RUNNER_TEMP/roger-secrets.json"
+          (umask 077 && node -e 'process.stdout.write(JSON.stringify({ GITHUB_CLIENT_SECRET: process.env.ROGER_GITHUB_CLIENT_SECRET }))' > "$secrets")
+          pnpm exec wrangler d1 migrations apply roger --remote
+          node scripts/brand.mjs
+          pnpm exec wrangler deploy --secrets-file "$secrets"
+          rm -f "$secrets"

@@ -60,32 +60,39 @@ just protocol   # regenerate the TypeScript after changing roger-protocol
 
 ## Deployment
 
-The Worker needs:
+Roger runs at <https://roger.origin89.com> as the `roger` Worker with the D1
+database `roger`; both are set in `apps/worker/wrangler.jsonc`, with the custom
+domain route and the public settings.
 
-- A D1 database named `roger`; put its `database_id` in `apps/worker/wrangler.jsonc`.
-- A route for `APP_ORIGIN`. `workers_dev` is off, so add a custom domain in
-  `wrangler.jsonc`, for example `"routes": [{ "pattern": "roger.origin89.com", "custom_domain": true }]`.
-- A GitHub OAuth App (not a GitHub App) with the callback URL
-  `<APP_ORIGIN>/auth/callback`. Sign-in asks for `read:org`, uses the token
-  once to check team membership, and discards it. If the organization
-  restricts third-party OAuth apps, an owner must approve this one, or every
-  sign-in is refused as not a member.
-- These settings:
+The `deploy` job in `origin89-check.yml` deploys each `main` commit after the
+checks pass, or on a manual run on `main`. It applies D1 migrations, then runs
+`wrangler deploy` with the Worker's secret. It uses:
 
-| Name | Kind | Meaning |
+| Name | Where | Meaning |
 | --- | --- | --- |
-| `APP_ORIGIN` | var | Where the inbox is served; also the passkey relying party |
-| `GITHUB_CLIENT_ID` | var | OAuth app client id |
-| `GITHUB_CLIENT_SECRET` | secret | OAuth app secret |
-| `GITHUB_ORG`, `GITHUB_TEAM` | var | Only active members of this team can sign in |
-| `NTFY_URL` | var | ntfy server; empty disables pushes. Each person picks a topic in Settings |
-| `NTFY_TOKEN` | secret | Optional ntfy access token |
-| `TIME_ZONE`, `WORK_HOURS`, `WORK_DAYS` | var | Working hours for quiet hours, `soon` pushes, expiry, and the digest |
+| `CLOUDFLARE_API_TOKEN` | organization secret, granted to this repository | Deploys the Worker and applies migrations |
+| `CLOUDFLARE_ACCOUNT_ID` | repository variable | Cloudflare account |
+| `ROGER_GITHUB_CLIENT_SECRET` | `roger-production` environment secret | The OAuth App secret, deployed as the Worker secret `GITHUB_CLIENT_SECRET`; GitHub reserves the `GITHUB_` prefix |
 
-Apply migrations with
-`pnpm --filter roger-worker exec wrangler d1 migrations apply roger --remote`
-before deploying. A passkey can only be removed from D1 directly:
-`DELETE FROM passkeys WHERE id = '<credential id>'`.
+The `roger-production` environment only accepts `main`. To rotate the OAuth
+secret, update the environment secret and rerun the workflow on `main`.
+
+Sign-in uses a GitHub OAuth App (not a GitHub App) with the callback URL
+`https://roger.origin89.com/auth/callback`. It asks for `read:org`, uses the
+token once to check membership of `GITHUB_TEAM`, and discards it. If the
+organization restricts third-party OAuth apps, an owner must approve this one,
+or every sign-in is refused as not a member.
+
+| Worker setting | Meaning |
+| --- | --- |
+| `APP_ORIGIN` | Where the inbox is served; also the passkey relying party |
+| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | The OAuth App |
+| `GITHUB_ORG`, `GITHUB_TEAM` | Only active members of this team can sign in |
+| `NTFY_URL`, `NTFY_TOKEN` | ntfy server and optional token; an empty URL disables pushes. Each person picks a topic in Settings |
+| `TIME_ZONE`, `WORK_HOURS`, `WORK_DAYS` | Working hours for quiet hours, `soon` pushes, expiry, and the digest |
+
+A passkey can only be removed from D1 directly:
+`pnpm --filter roger-worker exec wrangler d1 execute roger --remote --command "DELETE FROM passkeys WHERE id = '<credential id>'"`.
 
 ## License
 
