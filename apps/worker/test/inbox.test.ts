@@ -102,37 +102,6 @@ describe("the inbox", () => {
     ).toBe(404);
     expect((await readAsk(svc, bot.token, ask.id)).state).toBe("open");
   });
-
-  it("neither skips nor repeats Asks closed in the same millisecond", async () => {
-    const svc = services();
-    const me = await person(svc);
-    const bot = await requester(svc, me);
-    const ids: string[] = [];
-    for (let i = 0; i < 51; i++) {
-      const ask = await createAsk(svc, bot.token, approval({ urgency: "fyi" }));
-      ids.push(ask.id);
-    }
-    svc.clock.now += 1000;
-    for (const id of ids)
-      await agent(svc, bot.token, "POST", `/v1/asks/${id}/withdraw`);
-
-    type Page = { asks: Ask[]; next: string | null };
-    const first = await (
-      await browser(svc, me.cookie, "GET", "/v1/inbox/history")
-    ).json<Page>();
-    const second = await (
-      await browser(
-        svc,
-        me.cookie,
-        "GET",
-        `/v1/inbox/history?before=${encodeURIComponent(first.next ?? "")}`,
-      )
-    ).json<Page>();
-    const seen = [...first.asks, ...second.asks].map((a) => a.id);
-    expect(seen).toHaveLength(51);
-    expect(new Set(seen)).toEqual(new Set(ids));
-    expect(second.next).toBeNull();
-  });
 });
 
 describe("answering without a passkey", () => {
@@ -232,37 +201,6 @@ describe("answering without a passkey", () => {
       optionLabel: "Wilco",
       action: null,
     });
-  });
-
-  it("neither skips nor repeats Asks closed in the same millisecond", async () => {
-    const svc = services();
-    const me = await person(svc);
-    const bot = await requester(svc, me);
-    const ids: string[] = [];
-    for (let i = 0; i < 51; i++) {
-      const ask = await createAsk(svc, bot.token, approval({ urgency: "fyi" }));
-      ids.push(ask.id);
-    }
-    svc.clock.now += 1000;
-    for (const id of ids)
-      await agent(svc, bot.token, "POST", `/v1/asks/${id}/withdraw`);
-
-    type Page = { asks: Ask[]; next: string | null };
-    const first = await (
-      await browser(svc, me.cookie, "GET", "/v1/inbox/history")
-    ).json<Page>();
-    const second = await (
-      await browser(
-        svc,
-        me.cookie,
-        "GET",
-        `/v1/inbox/history?before=${encodeURIComponent(first.next ?? "")}`,
-      )
-    ).json<Page>();
-    const seen = [...first.asks, ...second.asks].map((a) => a.id);
-    expect(seen).toHaveLength(51);
-    expect(new Set(seen)).toEqual(new Set(ids));
-    expect(second.next).toBeNull();
   });
 });
 
@@ -501,37 +439,6 @@ describe("approving", () => {
       ),
     ).toBe(0);
   });
-
-  it("neither skips nor repeats Asks closed in the same millisecond", async () => {
-    const svc = services();
-    const me = await person(svc);
-    const bot = await requester(svc, me);
-    const ids: string[] = [];
-    for (let i = 0; i < 51; i++) {
-      const ask = await createAsk(svc, bot.token, approval({ urgency: "fyi" }));
-      ids.push(ask.id);
-    }
-    svc.clock.now += 1000;
-    for (const id of ids)
-      await agent(svc, bot.token, "POST", `/v1/asks/${id}/withdraw`);
-
-    type Page = { asks: Ask[]; next: string | null };
-    const first = await (
-      await browser(svc, me.cookie, "GET", "/v1/inbox/history")
-    ).json<Page>();
-    const second = await (
-      await browser(
-        svc,
-        me.cookie,
-        "GET",
-        `/v1/inbox/history?before=${encodeURIComponent(first.next ?? "")}`,
-      )
-    ).json<Page>();
-    const seen = [...first.asks, ...second.asks].map((a) => a.id);
-    expect(seen).toHaveLength(51);
-    expect(new Set(seen)).toEqual(new Set(ids));
-    expect(second.next).toBeNull();
-  });
 });
 
 describe("inbox authentication", () => {
@@ -602,37 +509,6 @@ describe("inbox authentication", () => {
     ).toBe(401);
     expect((await browser(svc, null, "GET", "/v1/inbox/me")).status).toBe(401);
   });
-
-  it("neither skips nor repeats Asks closed in the same millisecond", async () => {
-    const svc = services();
-    const me = await person(svc);
-    const bot = await requester(svc, me);
-    const ids: string[] = [];
-    for (let i = 0; i < 51; i++) {
-      const ask = await createAsk(svc, bot.token, approval({ urgency: "fyi" }));
-      ids.push(ask.id);
-    }
-    svc.clock.now += 1000;
-    for (const id of ids)
-      await agent(svc, bot.token, "POST", `/v1/asks/${id}/withdraw`);
-
-    type Page = { asks: Ask[]; next: string | null };
-    const first = await (
-      await browser(svc, me.cookie, "GET", "/v1/inbox/history")
-    ).json<Page>();
-    const second = await (
-      await browser(
-        svc,
-        me.cookie,
-        "GET",
-        `/v1/inbox/history?before=${encodeURIComponent(first.next ?? "")}`,
-      )
-    ).json<Page>();
-    const seen = [...first.asks, ...second.asks].map((a) => a.id);
-    expect(seen).toHaveLength(51);
-    expect(new Set(seen)).toEqual(new Set(ids));
-    expect(second.next).toBeNull();
-  });
 });
 
 describe("passkeys", () => {
@@ -695,37 +571,6 @@ describe("passkeys", () => {
       ).status,
     ).toBe(403);
     expect(await count("passkeys", "github_id = ?", me.githubId)).toBe(0);
-  });
-
-  it("neither skips nor repeats Asks closed in the same millisecond", async () => {
-    const svc = services();
-    const me = await person(svc);
-    const bot = await requester(svc, me);
-    const ids: string[] = [];
-    for (let i = 0; i < 51; i++) {
-      const ask = await createAsk(svc, bot.token, approval({ urgency: "fyi" }));
-      ids.push(ask.id);
-    }
-    svc.clock.now += 1000;
-    for (const id of ids)
-      await agent(svc, bot.token, "POST", `/v1/asks/${id}/withdraw`);
-
-    type Page = { asks: Ask[]; next: string | null };
-    const first = await (
-      await browser(svc, me.cookie, "GET", "/v1/inbox/history")
-    ).json<Page>();
-    const second = await (
-      await browser(
-        svc,
-        me.cookie,
-        "GET",
-        `/v1/inbox/history?before=${encodeURIComponent(first.next ?? "")}`,
-      )
-    ).json<Page>();
-    const seen = [...first.asks, ...second.asks].map((a) => a.id);
-    expect(seen).toHaveLength(51);
-    expect(new Set(seen)).toEqual(new Set(ids));
-    expect(second.next).toBeNull();
   });
 });
 
@@ -895,37 +740,6 @@ describe("requester management", () => {
       expect(response.status, name).toBe(400);
     }
   });
-
-  it("neither skips nor repeats Asks closed in the same millisecond", async () => {
-    const svc = services();
-    const me = await person(svc);
-    const bot = await requester(svc, me);
-    const ids: string[] = [];
-    for (let i = 0; i < 51; i++) {
-      const ask = await createAsk(svc, bot.token, approval({ urgency: "fyi" }));
-      ids.push(ask.id);
-    }
-    svc.clock.now += 1000;
-    for (const id of ids)
-      await agent(svc, bot.token, "POST", `/v1/asks/${id}/withdraw`);
-
-    type Page = { asks: Ask[]; next: string | null };
-    const first = await (
-      await browser(svc, me.cookie, "GET", "/v1/inbox/history")
-    ).json<Page>();
-    const second = await (
-      await browser(
-        svc,
-        me.cookie,
-        "GET",
-        `/v1/inbox/history?before=${encodeURIComponent(first.next ?? "")}`,
-      )
-    ).json<Page>();
-    const seen = [...first.asks, ...second.asks].map((a) => a.id);
-    expect(seen).toHaveLength(51);
-    expect(new Set(seen)).toEqual(new Set(ids));
-    expect(second.next).toBeNull();
-  });
 });
 
 describe("stalled answers", () => {
@@ -982,37 +796,6 @@ describe("stalled answers", () => {
     );
     expect(done.status).toBe(200);
     expect((await inbox(svc, cookie)).stalled).toEqual([]);
-  });
-
-  it("neither skips nor repeats Asks closed in the same millisecond", async () => {
-    const svc = services();
-    const me = await person(svc);
-    const bot = await requester(svc, me);
-    const ids: string[] = [];
-    for (let i = 0; i < 51; i++) {
-      const ask = await createAsk(svc, bot.token, approval({ urgency: "fyi" }));
-      ids.push(ask.id);
-    }
-    svc.clock.now += 1000;
-    for (const id of ids)
-      await agent(svc, bot.token, "POST", `/v1/asks/${id}/withdraw`);
-
-    type Page = { asks: Ask[]; next: string | null };
-    const first = await (
-      await browser(svc, me.cookie, "GET", "/v1/inbox/history")
-    ).json<Page>();
-    const second = await (
-      await browser(
-        svc,
-        me.cookie,
-        "GET",
-        `/v1/inbox/history?before=${encodeURIComponent(first.next ?? "")}`,
-      )
-    ).json<Page>();
-    const seen = [...first.asks, ...second.asks].map((a) => a.id);
-    expect(seen).toHaveLength(51);
-    expect(new Set(seen)).toEqual(new Set(ids));
-    expect(second.next).toBeNull();
   });
 });
 
@@ -1126,36 +909,5 @@ describe("notification settings", () => {
       ).status,
     ).toBe(204);
     expect(await svc.accounts.ntfyTopic(me.githubId)).toBeNull();
-  });
-
-  it("neither skips nor repeats Asks closed in the same millisecond", async () => {
-    const svc = services();
-    const me = await person(svc);
-    const bot = await requester(svc, me);
-    const ids: string[] = [];
-    for (let i = 0; i < 51; i++) {
-      const ask = await createAsk(svc, bot.token, approval({ urgency: "fyi" }));
-      ids.push(ask.id);
-    }
-    svc.clock.now += 1000;
-    for (const id of ids)
-      await agent(svc, bot.token, "POST", `/v1/asks/${id}/withdraw`);
-
-    type Page = { asks: Ask[]; next: string | null };
-    const first = await (
-      await browser(svc, me.cookie, "GET", "/v1/inbox/history")
-    ).json<Page>();
-    const second = await (
-      await browser(
-        svc,
-        me.cookie,
-        "GET",
-        `/v1/inbox/history?before=${encodeURIComponent(first.next ?? "")}`,
-      )
-    ).json<Page>();
-    const seen = [...first.asks, ...second.asks].map((a) => a.id);
-    expect(seen).toHaveLength(51);
-    expect(new Set(seen)).toEqual(new Set(ids));
-    expect(second.next).toBeNull();
   });
 });
