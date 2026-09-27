@@ -1,0 +1,22 @@
+[package]
+name = "roger-protocol"
+version = "0.1.0"
+description = "Ask, Answer, trace, and error types shared by the Roger CLI and Worker."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+specta.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+specta-serde.workspace = true
+specta-typescript.workspace = true
+
+[lints]
+workspace = true
