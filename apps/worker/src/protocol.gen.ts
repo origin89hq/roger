@@ -254,8 +254,10 @@ export type LoginConfig = {
 
 /**
  *  Body of `POST /v1/login`. The Worker accepts only a token its own OAuth app
- *  issued, and revokes it before issuing a credential; a refused request also
- *  revokes it, except a refusal by the rate limiter.
+ *  issued, and issues a credential only once GitHub confirms revoking it. A
+ *  refused request also revokes it, except a rate-limit refusal, a body that
+ *  is too large or not JSON, a token of another app, and a revocation GitHub
+ *  does not confirm.
  */
 export type MachineLogin = {
 	/**

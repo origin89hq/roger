@@ -42,9 +42,10 @@ github.com. The CLI asks only for `read:org`, which the team membership check
 needs, and sends the GitHub token once to the Worker. The Worker accepts only
 a token issued to its own OAuth app (a personal access token is refused), runs
 the same checks as inbox sign-in (who the person is and membership of
-`GITHUB_TEAM`), revokes the GitHub token on every path, and returns a machine
-credential. Membership is checked at login only: removing someone from the
-team does not revoke their machines, so revoke those in Settings. The client
+`GITHUB_TEAM`), revokes the GitHub token, and returns a machine credential
+only once GitHub confirms the revocation. Membership is checked at login only:
+removing someone from the team does not revoke their machines (see
+Deployment). The client
 secret stays a Worker secret; the CLI never sees it. The
 machine is named with `--machine`, defaulting to the host name, such as
 `studio`; a name belongs to one person while it is logged in. The CLI saves the
@@ -70,12 +71,21 @@ token from the job. `ROGER_URL` defaults to `https://roger.origin89.com`.
 The Worker admits 10 logins per minute per client IP, through the `LOGINS`
 rate-limit binding in `wrangler.jsonc`; without the binding it
 refuses every login. Machines behind one NAT share that limit, so log them in
-one at a time. A login refused by the limiter does not revoke the GitHub token
-it carried, so a limited address cannot make Roger call GitHub. That token
-stays valid, since tokens of an OAuth App do not expire (GitHub removes them
-after about a year unused); revoke it under GitHub Settings > Applications >
-Authorized OAuth Apps > Roger. Every other refusal revokes it, except a body
-over 4 KiB, which is not read. Each login pushes a notice to its owner with
+one at a time.
+
+A refused login also revokes the GitHub token it carried, with four
+exceptions, each of which leaves that token valid:
+
+- a refusal by the rate limiter, so a limited address cannot make Roger call
+  GitHub;
+- a body over 4 KiB or not JSON, from which no token can be read;
+- a token GitHub says Roger's app did not issue, which Roger cannot revoke;
+- GitHub not confirming the revocation after three attempts; nothing is
+  issued then.
+
+Tokens of an OAuth App do not expire (GitHub removes them after about a year
+unused); revoke a leftover one under GitHub Settings > Applications >
+Authorized OAuth Apps > Roger. Each login pushes a notice to its owner with
 the machine name and address, and Settings shows where each machine logged in
 from.
 

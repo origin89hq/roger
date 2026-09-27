@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::{Command as Process, Stdio};
 
 use roger_protocol::{
-    Action, AppendTrace, Ask, AskList, AskOption, AskState, CreateAsk, Decision, Kind,
+    Action, AppendTrace, Ask, AskList, AskOption, AskState, CreateAsk, Decision, Kind, LoginConfig,
     MachineLogin, Outcome, Resume, TraceEvent,
 };
 use serde::Serialize;
@@ -124,12 +124,7 @@ pub fn login(
     check_login_url(base)?;
     let roger = Client::anonymous(base);
     let config = roger.login_config()?;
-    if config.scope != LOGIN_SCOPE {
-        return Err(Error::Login(format!(
-            "the server asked for the GitHub scope `{}`; roger login grants only {LOGIN_SCOPE}",
-            config.scope
-        )));
-    }
+    check_login_config(&config)?;
     let github = GitHub::new(GITHUB_URL);
     let started = github.device_code(&config.github_client_id, LOGIN_SCOPE)?;
     let github_token = wait_for_token(
@@ -186,35 +181,36 @@ fn token_file_notice(token_file: Option<&Path>) -> Option<String> {
 const LOGIN_SCOPE: &str = "read:org";
 
 /// `roger login` sends a GitHub token to `base`, so it must be https, or
-/// plain http to this computer for local development.
+/// plain http to this computer for local development. Parsed as the HTTP
+/// client parses it; a URL carrying a user name or password is refused.
 fn check_login_url(base: &str) -> Result<()> {
-    if base.starts_with("https://") {
+    let refused = || Error::InsecureLoginUrl(base.to_owned());
+    let uri: ureq::http::Uri = base.parse().map_err(|_| refused())?;
+    let authority = uri.authority().ok_or_else(refused)?;
+    if authority.as_str().contains('@') {
+        return Err(refused());
+    }
+    let host = authority.host();
+    let loopback = host == "localhost"
+        || host.ends_with(".localhost")
+        || host == "127.0.0.1"
+        || host == "[::1]";
+    match uri.scheme_str() {
+        Some("https") => Ok(()),
+        Some("http") if loopback => Ok(()),
+        _ => Err(refused()),
+    }
+}
+
+/// `roger login` grants GitHub only [`LOGIN_SCOPE`], whatever the server asks.
+fn check_login_config(config: &LoginConfig) -> Result<()> {
+    if config.scope == LOGIN_SCOPE {
         return Ok(());
     }
-    let host = base
-        .strip_prefix("http://")
-        .map(|rest| rest.split('/').next().unwrap_or_default())
-        .map(|authority| {
-            if authority.starts_with('[') {
-                authority
-                    .split(']')
-                    .next()
-                    .map_or("", |h| h.trim_start_matches('['))
-            } else {
-                authority.split(':').next().unwrap_or_default()
-            }
-        });
-    match host {
-        Some(host)
-            if host == "localhost"
-                || host.ends_with(".localhost")
-                || host == "127.0.0.1"
-                || host == "::1" =>
-        {
-            Ok(())
-        }
-        _ => Err(Error::InsecureLoginUrl(base.to_owned())),
-    }
+    Err(Error::Login(format!(
+        "the server asked for the GitHub scope `{}`; roger login grants only {LOGIN_SCOPE}",
+        config.scope
+    )))
 }
 
 /// `roger logout`: revokes the saved login where it was issued, then deletes it.
@@ -820,23 +816,44 @@ mod tests {
     fn login_sends_github_tokens_only_over_https_or_to_this_computer() {
         for ok in [
             "https://roger.origin89.com",
+            "https://roger.origin89.com:8443/",
             "http://localhost:8792",
             "http://127.0.0.1:8792/",
             "http://[::1]:8792",
-            "http://roger.localhost",
+            "http://attacker.localhost",
         ] {
             assert!(check_login_url(ok).is_ok(), "{ok}");
         }
         for bad in [
             "http://roger.origin89.com",
-            "http://localhost.evil.test",
-            "http://127.0.0.1.evil.test",
+            "http://localhost.attacker.example",
+            "http://127.0.0.1.attacker.example",
+            "http://localhost:password@attacker.example",
+            "http://user@localhost:8792",
+            "https://user:pass@roger.origin89.com",
+            "http://[::2]:8792",
             "ftp://localhost",
             "roger.origin89.com",
+            "",
         ] {
             assert!(
                 matches!(check_login_url(bad), Err(Error::InsecureLoginUrl(_))),
                 "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn login_refuses_a_server_asking_for_more_than_read_org() {
+        let config = |scope: &str| LoginConfig {
+            github_client_id: "Ov23client".to_owned(),
+            scope: scope.to_owned(),
+        };
+        assert!(check_login_config(&config("read:org")).is_ok());
+        for hostile in ["repo", "read:org repo", "read:org,admin:org", ""] {
+            assert!(
+                matches!(check_login_config(&config(hostile)), Err(Error::Login(_))),
+                "{hostile}"
             );
         }
     }
@@ -848,6 +865,48 @@ mod tests {
         let file = dir.join("token");
         std::fs::write(&file, " \n")?;
         assert_eq!(token_file_notice(Some(&file)), None);
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn login_stops_before_github_when_the_server_or_url_is_wrong()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::{BufRead, BufReader, Write as _};
+        let dir = std::env::temp_dir().join(format!("roger-cli-login-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("credentials");
+        let machine: MachineName = "studio".parse()?;
+
+        assert!(matches!(
+            login("http://roger.example", &path, None, Some(machine.clone())),
+            Err(Error::InsecureLoginUrl(_))
+        ));
+
+        // A server asking for a broader scope: refused after GET /v1/login,
+        // before anything reaches GitHub.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let base = format!("http://{}", listener.local_addr()?);
+        let server = std::thread::spawn(move || -> std::io::Result<String> {
+            let (stream, _) = listener.accept()?;
+            let mut line = String::new();
+            BufReader::new(stream.try_clone()?).read_line(&mut line)?;
+            let body = r#"{"githubClientId":"Ov23client","scope":"repo"}"#;
+            let mut writer = stream;
+            write!(
+                writer,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )?;
+            Ok(line)
+        });
+        match login(&base, &path, None, Some(machine)) {
+            Err(Error::Login(message)) => assert!(message.contains("`repo`"), "{message}"),
+            other => return Err(format!("unexpected {other:?}").into()),
+        }
+        let line = server.join().map_err(|_| "server panicked")??;
+        assert!(line.starts_with("GET /v1/login "), "{line}");
+        assert!(!path.exists());
         std::fs::remove_dir_all(&dir)?;
         Ok(())
     }
