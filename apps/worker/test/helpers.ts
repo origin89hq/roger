@@ -2,8 +2,9 @@ import { env } from "cloudflare:test";
 import { Accounts } from "../src/accounts.ts";
 import { createApp, type Services } from "../src/app.ts";
 import { type Config, readSchedule } from "../src/config.ts";
-import type { GitHub, Membership } from "../src/github.ts";
+import type { GitHub, Membership, Revocation } from "../src/github.ts";
 import { base64url } from "../src/ids.ts";
+import { Machines } from "../src/machines.ts";
 import type { Notifier, Push } from "../src/notify.ts";
 import { Passkeys } from "../src/passkeys.ts";
 import type {
@@ -56,6 +57,23 @@ export class FakeGitHub implements GitHub {
     if (this.outage) return "unavailable";
     return this.members.has(login) ? "active" : "none";
   }
+  /** Tokens issued to Roger's app; others, such as personal access tokens, are foreign. */
+  appTokens = new Set<string>();
+  async appUser(token: string) {
+    if (this.outage) return "unavailable" as const;
+    const user = this.users.get(token);
+    return user && this.appTokens.has(token) ? user : ("foreign" as const);
+  }
+  /** Revocation attempts, in order. A revoked token no longer identifies anyone. */
+  revoked: string[] = [];
+  /** Set to make every revocation fail as a GitHub outage would. */
+  revokeFails = false;
+  async revoke(token: string): Promise<Revocation> {
+    this.revoked.push(token);
+    if (this.revokeFails) return "unavailable";
+    const known = this.users.delete(token);
+    return known ? "revoked" : "gone";
+  }
 }
 
 export class FakeNotifier implements Notifier {
@@ -67,7 +85,19 @@ export class FakeNotifier implements Notifier {
   }
 }
 
+/** Counts logins per IP, like the Workers Rate Limiting binding. */
+export class FakeLimiter {
+  counts = new Map<string, number>();
+  limit = 10;
+  async admit(ip: string): Promise<boolean> {
+    const n = (this.counts.get(ip) ?? 0) + 1;
+    this.counts.set(ip, n);
+    return n <= this.limit;
+  }
+}
+
 export interface TestServices extends Services {
+  limiter: FakeLimiter;
   clock: { now: number };
   notifier: FakeNotifier;
   github: FakeGitHub;
@@ -79,9 +109,13 @@ export function services(now = MONDAY_10AM): TestServices {
   const accounts = new Accounts(env.DB);
   const clock = { now };
   const deferred: Promise<unknown>[] = [];
+  const limiter = new FakeLimiter();
   return {
+    limiter,
+    loginLimit: (ip) => limiter.admit(ip),
     store: new Store(env.DB),
     accounts,
+    machines: new Machines(env.DB),
     passkeys: new Passkeys(accounts, config),
     github: new FakeGitHub(),
     notifier: new FakeNotifier(),

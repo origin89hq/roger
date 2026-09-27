@@ -204,6 +204,8 @@ export type ErrorCode =
 "conflict" | 
 /**  The request body exceeds the size limit. */
 "too_large" | 
+/**  Too many attempts; wait and try again. */
+"too_many_requests" | 
 /**  The Worker failed. */
 "internal";
 
@@ -240,6 +242,41 @@ export type Link = {
 	label: string,
 	/**  An `https` URL. */
 	url: string,
+};
+
+/**  Response of `GET /v1/login`: how `roger login` signs in with GitHub. */
+export type LoginConfig = {
+	/**  The deployment's GitHub OAuth app, for GitHub's device flow. */
+	githubClientId: string,
+	/**  OAuth scopes to request; the Worker needs them to check membership. */
+	scope: string,
+};
+
+/**
+ *  Body of `POST /v1/login`. The Worker accepts only a token its own OAuth app
+ *  issued, and issues a credential only once GitHub confirms revoking it. A
+ *  refused request also revokes it, except a rate-limit refusal, a body that
+ *  is too large or not JSON, a token of another app, and a revocation GitHub
+ *  does not confirm.
+ */
+export type MachineLogin = {
+	/**
+	 *  A GitHub token from the device flow. The Worker checks who it belongs
+	 *  to, revokes it, and never stores it.
+	 */
+	githubToken: string,
+	/**  The machine name, such as `studio`. */
+	machine: string,
+};
+
+/**  Response of `POST /v1/login`. */
+export type MachineToken = {
+	/**  The machine credential. Shown once; the Worker stores only its hash. */
+	credential: string,
+	/**  The machine name. */
+	machine: string,
+	/**  GitHub login of the person who logged in, who owns the machine. */
+	owner: string,
 };
 
 /**  A trace event the requester may report. `delivered` is Roger's own. */

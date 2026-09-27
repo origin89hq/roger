@@ -661,11 +661,11 @@ describe("requester management", () => {
     const theirs = await requester(svc, other);
     const list = await (
       await browser(svc, me.cookie, "GET", "/v1/inbox/requesters")
-    ).json<{ requesters: { id: string }[]; truncated: boolean }>();
+    ).json<{ requesters: { id: string }[]; next: string | null }>();
     const ids = list.requesters.map((r) => r.id);
     expect(ids).toContain(mine.id);
     expect(ids).not.toContain(theirs.id);
-    expect(list.truncated).toBe(false);
+    expect(list.next).toBeNull();
   });
 
   it("lets only the owner issue tokens, revoke them, or disable the requester", async () => {

@@ -1,6 +1,6 @@
 ---
 name: roger
-description: Ask a person for a decision through Roger and act on the answer. Use when an agent, coordinator, or scheduled job needs human approval or a human choice it may not make itself, such as merging, releasing, or resolving an open product question, and `roger` is installed with a token.
+description: Ask a person for a decision through Roger and act on the answer. Use when an agent, coordinator, or scheduled job needs human approval or a human choice it may not make itself, such as merging, releasing, or resolving an open product question, and `roger` is installed and logged in.
 license: MIT OR Apache-2.0
 ---
 
@@ -20,13 +20,28 @@ the code, the issue, or existing rules first. An Ask interrupts a person.
 roger --version && roger list --open >/dev/null
 ```
 
-Exit 0 means the binary and token work. Otherwise, stop and report; do not
+Exit 0 means the binary and login work. Otherwise, stop and report; do not
 fall back to guessing the answer.
 
 - Install or update with `cargo install --locked roger-cli`.
-- The token comes from `ROGER_TOKEN`, the file named by `ROGER_TOKEN_FILE`, or
-  `~/.config/roger/token`. A person creates it in the inbox under Settings,
-  one requester per automation and machine, such as `orca@studio`.
+- Each machine logs in once: a person runs `roger login`, enters the code it
+  prints on GitHub, and the login is saved to
+  `~/.config/roger/credentials`. Do not run `roger login` or `roger logout`
+  unless the person asks; login needs them at the browser.
+- Name your automation on every call with `--as <name>` or
+  `ROGER_REQUESTER=<name>`, such as `issue-coordinator` or `merge-gate`.
+  Roger resolves it to the requester `<machine>/<name>`, created on first use,
+  so your Asks, idempotency keys, decision keys, and `list` results are yours
+  alone. Use one stable name per automation, not per run; a machine has at
+  most 100. Without a name you act as `<machine>/default`, shared with every
+  other unnamed job on the machine.
+- Any process that can read the machine's login can act as any of its
+  requesters. Names keep jobs' answers apart; they do not limit what a job can
+  do.
+- A requester token from Settings still works, and any token takes
+  precedence over the login: `ROGER_TOKEN`, then `ROGER_TOKEN_FILE`, then
+  `~/.config/roger/token`. A token is one requester, so `--as` needs the
+  login.
 - `ROGER_URL` defaults to `https://roger.origin89.com`.
 
 ## Ask

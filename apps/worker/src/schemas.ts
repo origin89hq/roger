@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { ULID_PATTERN } from "./ids.ts";
-import type { AppendTrace, CreateAsk } from "./protocol.gen.ts";
+import type { AppendTrace, CreateAsk, MachineLogin } from "./protocol.gen.ts";
 
 /** Content limits. The API enforces them; the CLI and inbox rely on its errors. */
 export const LIMITS = {
@@ -219,10 +219,43 @@ export type AnswerRequest = z.infer<typeof answer>;
 
 export const answerChallenge = answer.omit({ assertion: true });
 
+/** A requester name made in Settings, or an automation name from `--as`. */
+export const requesterName = z
+  .string()
+  .regex(/^[a-z0-9][a-z0-9._@-]{0,79}$/, "must be a short lowercase name");
+
+/** A machine name chosen at `roger login`, such as `studio`. */
+export const machineName = z
+  .string()
+  .regex(
+    /^[a-z0-9][a-z0-9-]{0,39}$/,
+    "must be a short lowercase name of letters, digits, and dashes",
+  );
+
+export const machineLogin = z.strictObject({
+  githubToken: z.string().min(1).max(512),
+  machine: machineName,
+});
+
+export const machineRef = z.strictObject({
+  machineId: z.string().regex(ULID_PATTERN, "must be a machine id"),
+});
+/** A requester name from a previous page, including renamed ones. */
+export const requesterCursor = z.strictObject({
+  // Empty means the first page, as absent does.
+  after: z.string().max(300).optional(),
+});
+export const machineCursor = z.strictObject({
+  after: z
+    .union([
+      z.literal(""),
+      z.string().regex(ULID_PATTERN, "must be a machine id"),
+    ])
+    .optional(),
+});
+
 export const newRequester = z.strictObject({
-  name: z
-    .string()
-    .regex(/^[a-z0-9][a-z0-9._@-]{0,79}$/, "must be a short lowercase name"),
+  name: requesterName,
   pickupMinutes: z.int().min(1).max(LIMITS.expiresInMinutes).exactOptional(),
   completionMinutes: z
     .int()
@@ -261,5 +294,10 @@ const appendTraceMatchesProtocol: Equals<
   z.output<typeof appendTrace>,
   AppendTrace
 > = true;
+const machineLoginMatchesProtocol: Equals<
+  z.output<typeof machineLogin>,
+  MachineLogin
+> = true;
 void createAskMatchesProtocol;
+void machineLoginMatchesProtocol;
 void appendTraceMatchesProtocol;

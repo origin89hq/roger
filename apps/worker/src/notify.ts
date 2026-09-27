@@ -71,6 +71,21 @@ export function digestPush(open: readonly Ask[], origin: string): Push {
   };
 }
 
+export function machineLoginPush(
+  login: string,
+  machine: string,
+  source: string,
+  origin: string,
+): Push {
+  return {
+    title: "A machine logged in to your Roger account",
+    message: `${login} logged in machine ${machine} from ${source}. It can create Asks and read answers as its requesters. If this was not you, revoke it in Settings.`,
+    priority: 4,
+    tags: ["warning"],
+    click: `${origin}/#settings`,
+  };
+}
+
 export function passkeyAddedPush(login: string, origin: string): Push {
   return {
     title: "A passkey was added to your Roger account",

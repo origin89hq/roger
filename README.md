@@ -29,10 +29,65 @@ what it did with `roger trace <id> dispatched|progress|applied|failed|not_applic
 `roger --help` lists every flag.
 
 Install the CLI with `cargo install --locked roger-cli`; rerunning it updates
-to the latest release. It reads the token from `ROGER_TOKEN`, the file named by
-`ROGER_TOKEN_FILE`, or `~/.config/roger/token`, and `ROGER_URL` (default
-`https://roger.origin89.com`). Create a requester and its token under Settings
-in the inbox.
+to the latest release. Then log the machine in once:
+
+```sh
+roger login                      # prints a code; enter it on github.com
+roger ask --as merge-gate ...    # or export ROGER_REQUESTER=merge-gate
+```
+
+`roger login` signs in with GitHub's device flow, using the same OAuth app as
+the inbox (device flow must be enabled on it). The person enters the code on
+github.com. The CLI asks only for `read:org`, which the team membership check
+needs, and sends the GitHub token once to the Worker. The Worker accepts only
+a token issued to its own OAuth app (a personal access token is refused), runs
+the same checks as inbox sign-in (who the person is and membership of
+`GITHUB_TEAM`), revokes the GitHub token, and returns a machine credential
+only once GitHub confirms the revocation. Membership is checked at login only:
+removing someone from the team does not revoke their machines (see
+Deployment). The client
+secret stays a Worker secret; the CLI never sees it. The
+machine is named with `--machine`, defaulting to the host name, such as
+`studio`; a name belongs to one person while it is logged in. The CLI saves the
+machine credential to `~/.config/roger/credentials` with mode 0600; the Worker
+stores only its hash, and no GitHub token is kept anywhere. Each automation names itself with `--as <name>` or
+`ROGER_REQUESTER`, and Roger resolves it to the requester `<machine>/<name>`,
+created on first use. A call without a name acts as `<machine>/default`.
+Asks, idempotency keys, decision keys, and `list` stay per requester, so jobs
+on one machine do not see each other's answers. Settings lists each machine
+and its requesters: disabling a requester stops one automation, and revoking
+the machine, or `roger logout` on it, stops all of them.
+
+Any process that can read a machine's credential can act as any of that
+machine's requesters, as every job on a machine could read a shared token file
+before. Requester names separate bookkeeping, not privilege.
+
+Requesters and tokens created under Settings keep working, and any token takes
+precedence over the login: `ROGER_TOKEN`, then `ROGER_TOKEN_FILE`, then
+`~/.config/roger/token`. To move such a requester to the login, adopt it to
+the machine in Settings, so `--as <name>` there keeps its Asks, and remove the
+token from the job. `ROGER_URL` defaults to `https://roger.origin89.com`.
+
+The Worker admits 10 logins per minute per client IP, through the `LOGINS`
+rate-limit binding in `wrangler.jsonc`; without the binding it
+refuses every login. Machines behind one NAT share that limit, so log them in
+one at a time.
+
+A refused login also revokes the GitHub token it carried, with four
+exceptions, each of which leaves that token valid:
+
+- a refusal by the rate limiter, so a limited address cannot make Roger call
+  GitHub;
+- a body over 4 KiB or not JSON, from which no token can be read;
+- a token GitHub says Roger's app did not issue, which Roger cannot revoke;
+- GitHub not confirming the revocation after three attempts; nothing is
+  issued then.
+
+Tokens of an OAuth App do not expire (GitHub removes them after about a year
+unused); revoke a leftover one under GitHub Settings > Applications >
+Authorized OAuth Apps > Roger. Each login pushes a notice to its owner with
+the machine name and address, and Settings shows where each machine logged in
+from.
 
 ## Agent skills
 
@@ -116,6 +171,14 @@ or every sign-in is refused as not a member.
 | `GITHUB_ORG`, `GITHUB_TEAM` | Only active members of this team can sign in |
 | `NTFY_URL`, `NTFY_TOKEN` | ntfy server and optional token; an empty URL disables pushes. Each person picks a topic in Settings |
 | `TIME_ZONE`, `WORK_HOURS`, `WORK_DAYS` | Working hours for quiet hours, `soon` pushes, expiry, and the digest |
+
+Removing someone from `GITHUB_TEAM` or the organization stops new sign-ins
+and logins, but does not revoke their machines or requester tokens. Revoke
+them in D1, with `<github id>` their numeric GitHub user id:
+
+```sh
+pnpm --filter roger-worker exec wrangler d1 execute roger --remote --command "UPDATE machines SET revoked_at = unixepoch() * 1000 WHERE owner = <github id> AND revoked_at IS NULL; UPDATE tokens SET revoked_at = unixepoch() * 1000 WHERE revoked_at IS NULL AND requester_id IN (SELECT id FROM requesters WHERE created_by = <github id>); DELETE FROM sessions WHERE github_id = <github id>"
+```
 
 A passkey can only be removed from D1 directly:
 `pnpm --filter roger-worker exec wrangler d1 execute roger --remote --command "DELETE FROM passkeys WHERE id = '<credential id>'"`.

@@ -5,15 +5,17 @@ use std::path::Path;
 use std::process::{Command as Process, Stdio};
 
 use roger_protocol::{
-    Action, AppendTrace, Ask, AskList, AskOption, AskState, CreateAsk, Decision, Kind, Outcome,
-    Resume, TraceEvent,
+    Action, AppendTrace, Ask, AskList, AskOption, AskState, CreateAsk, Decision, Kind, LoginConfig,
+    MachineLogin, Outcome, Resume, TraceEvent,
 };
 use serde::Serialize;
 
-use crate::cli::{AskArgs, Command, ListArgs, ListFormat, TraceArgs};
-use crate::client::{Client, ListFilter};
+use crate::cli::{ApiCommand, AskArgs, ListArgs, ListFormat, TraceArgs};
+use crate::client::{Client, ListFilter, holds_token};
+use crate::credentials::{self, Credentials};
 use crate::error::{Error, Result};
-use crate::parse::{github_repo_from_remote, refs_to_map, whole_minutes};
+use crate::login::{GITHUB_URL, GitHub, wait_for_token};
+use crate::parse::{MachineName, github_repo_from_remote, refs_to_map, whole_minutes};
 use crate::wait::{SystemClock, wait};
 
 /// Largest `--body-file` accepted.
@@ -22,9 +24,9 @@ const MAX_BODY_BYTES: u64 = 1024 * 1024;
 const MAX_PAGES: usize = 50;
 
 /// Runs a command and returns the process exit code.
-pub fn run(client: &Client, command: Command) -> Result<u8> {
+pub fn run(client: &Client, command: ApiCommand) -> Result<u8> {
     match command {
-        Command::Ask(args) => {
+        ApiCommand::Ask(args) => {
             let body = match &args.body_file {
                 Some(path) => Some(read_body(path)?),
                 None => args.body.clone(),
@@ -46,17 +48,17 @@ pub fn run(client: &Client, command: Command) -> Result<u8> {
             print_json(&ask)?;
             Ok(exit_code(ask.outcome()))
         }
-        Command::Get { id } => {
+        ApiCommand::Get { id } => {
             let ask = client.get(&id)?;
             print_json(&ask)?;
             Ok(exit_code(ask.outcome()))
         }
-        Command::Wait { id, timeout } => {
+        ApiCommand::Wait { id, timeout } => {
             let ask = wait(|| client.get(&id), &mut SystemClock, timeout)?;
             print_json(&ask)?;
             Ok(exit_code(ask.outcome()))
         }
-        Command::List(args) => {
+        ApiCommand::List(args) => {
             let filter = list_filter(&args);
             let asks = collect_pages(|after| client.list_page(&filter, after))?;
             match args.format {
@@ -65,12 +67,11 @@ pub fn run(client: &Client, command: Command) -> Result<u8> {
             }
             Ok(0)
         }
-        Command::Withdraw { id } => {
+        ApiCommand::Withdraw { id } => {
             print_json(&client.withdraw(&id)?)?;
             Ok(0)
         }
-        Command::Skill { name } => print_skill(name.as_deref()),
-        Command::Trace(args) => {
+        ApiCommand::Trace(args) => {
             let TraceArgs {
                 id,
                 event,
@@ -94,6 +95,150 @@ pub fn run(client: &Client, command: Command) -> Result<u8> {
             Ok(0)
         }
     }
+}
+
+/// `roger login`: signs in with GitHub's device flow, exchanges that token
+/// once for a machine credential, saves it, and only then revokes the login
+/// it replaces, so a failed login leaves the old one working. A damaged
+/// credentials file is set aside instead of blocking the login.
+pub fn login(
+    base: &str,
+    path: &Path,
+    token_file: Option<&Path>,
+    machine: Option<MachineName>,
+) -> Result<u8> {
+    let old = match credentials::load(path) {
+        Ok(old) => old,
+        Err(err) => {
+            let aside = credentials::set_aside(path)?;
+            eprintln!(
+                "roger: {err}; moved it to {} and continuing without it",
+                aside.display()
+            );
+            None
+        }
+    };
+    let machine = machine
+        .or_else(host_machine_name)
+        .ok_or(Error::NoMachineName)?;
+    check_login_url(base)?;
+    let roger = Client::anonymous(base);
+    let config = roger.login_config()?;
+    check_login_config(&config)?;
+    let github = GitHub::new(GITHUB_URL);
+    let started = github.device_code(&config.github_client_id, LOGIN_SCOPE)?;
+    let github_token = wait_for_token(
+        &started,
+        |code| github.poll(&config.github_client_id, code),
+        &mut SystemClock,
+        &mut std::io::stderr(),
+    )?;
+    let token = roger.exchange(&MachineLogin {
+        github_token,
+        machine: machine.as_str().to_owned(),
+    })?;
+    credentials::save(
+        path,
+        &Credentials {
+            url: base.to_owned(),
+            machine: token.machine.clone(),
+            owner: token.owner.clone(),
+            credential: token.credential,
+        },
+    )?;
+    // Under the same name the Worker already revoked it; this covers a new name.
+    if let Some(old) = old.filter(|old| old.url == base)
+        && let Err(err) = revoke(&old)
+    {
+        eprintln!(
+            "roger: could not revoke the previous login of {}: {err}; revoke it in Settings",
+            old.machine
+        );
+    }
+    eprintln!(
+        "roger: logged in as machine {machine} for @{owner}. Name each automation with --as <name> \
+         or ROGER_REQUESTER; without a name, calls act as {machine}/default.",
+        machine = token.machine,
+        owner = token.owner,
+    );
+    if let Some(notice) = token_file_notice(token_file) {
+        eprintln!("roger: {notice}");
+    }
+    Ok(0)
+}
+
+/// Why a fresh login is not used yet: a saved token file takes precedence.
+fn token_file_notice(token_file: Option<&Path>) -> Option<String> {
+    let file = token_file.filter(|file| holds_token(file).unwrap_or(true))?;
+    Some(format!(
+        "{} still takes precedence over this login. Adopt its requester to this machine in \
+         Settings and move the file away to use the login.",
+        file.display()
+    ))
+}
+
+/// The only GitHub scope `roger login` grants: enough to check team membership.
+const LOGIN_SCOPE: &str = "read:org";
+
+/// `roger login` sends a GitHub token to `base`, so it must be https, or
+/// plain http to this computer for local development. Parsed as the HTTP
+/// client parses it; a URL carrying a user name or password is refused.
+fn check_login_url(base: &str) -> Result<()> {
+    let refused = || Error::InsecureLoginUrl(base.to_owned());
+    let uri: ureq::http::Uri = base.parse().map_err(|_| refused())?;
+    let authority = uri.authority().ok_or_else(refused)?;
+    if authority.as_str().contains('@') {
+        return Err(refused());
+    }
+    let host = authority.host();
+    let loopback = host == "localhost"
+        || host.ends_with(".localhost")
+        || host == "127.0.0.1"
+        || host == "[::1]";
+    match uri.scheme_str() {
+        Some("https") => Ok(()),
+        Some("http") if loopback => Ok(()),
+        _ => Err(refused()),
+    }
+}
+
+/// `roger login` grants GitHub only [`LOGIN_SCOPE`], whatever the server asks.
+fn check_login_config(config: &LoginConfig) -> Result<()> {
+    if config.scope == LOGIN_SCOPE {
+        return Ok(());
+    }
+    Err(Error::Login(format!(
+        "the server asked for the GitHub scope `{}`; roger login grants only {LOGIN_SCOPE}",
+        config.scope
+    )))
+}
+
+/// `roger logout`: revokes the saved login where it was issued, then deletes it.
+pub fn logout(path: &Path) -> Result<u8> {
+    let saved = credentials::load(path)?.ok_or(Error::NotLoggedIn)?;
+    revoke(&saved)?;
+    credentials::remove(path)?;
+    eprintln!("roger: logged out {}", saved.machine);
+    Ok(0)
+}
+
+/// Revokes a saved login. One the server no longer accepts is already revoked.
+fn revoke(saved: &Credentials) -> Result<()> {
+    match Client::new(&saved.url, &saved.credential, None).logout() {
+        Ok(()) | Err(Error::Api { status: 401, .. }) => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+/// This host's name as a machine name, if `hostname` answers with a usable one.
+fn host_machine_name() -> Option<MachineName> {
+    let output = Process::new("hostname")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    MachineName::from_host(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// Agent skills for this version of the CLI, by the name `roger skill` takes.
@@ -406,7 +551,7 @@ mod tests {
             Some("unknown skill `opencode`; known skills: roger, orca")
         );
     }
-    use crate::cli::Cli;
+    use crate::cli::{Cli, Command};
     use crate::test_support::ask;
 
     fn ask_args(extra: &[&str]) -> AskArgs {
@@ -428,7 +573,7 @@ mod tests {
         ];
         command_line.extend_from_slice(extra);
         match Cli::try_parse_from(command_line).map(|cli| cli.command) {
-            Ok(Command::Ask(args)) => *args,
+            Ok(Command::Api(ApiCommand::Ask(args))) => *args,
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -650,5 +795,119 @@ mod tests {
     fn missing_body_file_is_an_error() {
         let got = read_body(Path::new("/nonexistent/roger-body.md"));
         assert!(matches!(got, Err(Error::BodyFile { .. })));
+    }
+
+    #[test]
+    fn login_warns_only_when_a_token_file_would_win() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = std::env::temp_dir().join(format!("roger-cli-notice-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let file = dir.join("token");
+        assert_eq!(token_file_notice(Some(&file)), None);
+        assert_eq!(token_file_notice(None), None);
+        std::fs::write(&file, "roger_x\n")?;
+        let notice = token_file_notice(Some(&file)).ok_or("no notice")?;
+        assert!(notice.starts_with(&format!("{} still takes precedence", file.display())));
+        assert!(notice.contains("Adopt its requester"));
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn login_sends_github_tokens_only_over_https_or_to_this_computer() {
+        for ok in [
+            "https://roger.origin89.com",
+            "https://roger.origin89.com:8443/",
+            "http://localhost:8792",
+            "http://127.0.0.1:8792/",
+            "http://[::1]:8792",
+            "http://attacker.localhost",
+        ] {
+            assert!(check_login_url(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://roger.origin89.com",
+            "http://localhost.attacker.example",
+            "http://127.0.0.1.attacker.example",
+            "http://localhost:password@attacker.example",
+            "http://user@localhost:8792",
+            "https://user:pass@roger.origin89.com",
+            "http://[::2]:8792",
+            "ftp://localhost",
+            "roger.origin89.com",
+            "",
+        ] {
+            assert!(
+                matches!(check_login_url(bad), Err(Error::InsecureLoginUrl(_))),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn login_refuses_a_server_asking_for_more_than_read_org() {
+        let config = |scope: &str| LoginConfig {
+            github_client_id: "Ov23client".to_owned(),
+            scope: scope.to_owned(),
+        };
+        assert!(check_login_config(&config("read:org")).is_ok());
+        for hostile in ["repo", "read:org repo", "read:org,admin:org", ""] {
+            assert!(
+                matches!(check_login_config(&config(hostile)), Err(Error::Login(_))),
+                "{hostile}"
+            );
+        }
+    }
+
+    #[test]
+    fn login_does_not_claim_a_blank_token_file_wins() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = std::env::temp_dir().join(format!("roger-cli-blank-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let file = dir.join("token");
+        std::fs::write(&file, " \n")?;
+        assert_eq!(token_file_notice(Some(&file)), None);
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn login_stops_before_github_when_the_server_or_url_is_wrong()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::{BufRead, BufReader, Write as _};
+        let dir = std::env::temp_dir().join(format!("roger-cli-login-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("credentials");
+        let machine: MachineName = "studio".parse()?;
+
+        assert!(matches!(
+            login("http://roger.example", &path, None, Some(machine.clone())),
+            Err(Error::InsecureLoginUrl(_))
+        ));
+
+        // A server asking for a broader scope: refused after GET /v1/login,
+        // before anything reaches GitHub.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let base = format!("http://{}", listener.local_addr()?);
+        let server = std::thread::spawn(move || -> std::io::Result<String> {
+            let (stream, _) = listener.accept()?;
+            let mut line = String::new();
+            BufReader::new(stream.try_clone()?).read_line(&mut line)?;
+            let body = r#"{"githubClientId":"Ov23client","scope":"repo"}"#;
+            let mut writer = stream;
+            write!(
+                writer,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )?;
+            Ok(line)
+        });
+        match login(&base, &path, None, Some(machine)) {
+            Err(Error::Login(message)) => assert!(message.contains("`repo`"), "{message}"),
+            other => return Err(format!("unexpected {other:?}").into()),
+        }
+        let line = server.join().map_err(|_| "server panicked")??;
+        assert!(line.starts_with("GET /v1/login "), "{line}");
+        assert!(!path.exists());
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
     }
 }

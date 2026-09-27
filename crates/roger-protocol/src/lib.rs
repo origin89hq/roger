@@ -224,6 +224,8 @@ wire_enum! {
         Conflict = "conflict",
         /// The request body exceeds the size limit.
         TooLarge = "too_large",
+        /// Too many attempts; wait and try again.
+        TooManyRequests = "too_many_requests",
         /// The Worker failed.
         Internal = "internal",
     }
@@ -548,6 +550,47 @@ pub struct ErrorBody {
     pub error: ErrorDetail,
 }
 
+/// The header naming the automation a machine credential acts for. Absent
+/// means `default`; the Worker resolves it to the requester `<machine>/<name>`.
+pub const REQUESTER_HEADER: &str = "roger-requester";
+
+/// Response of `GET /v1/login`: how `roger login` signs in with GitHub.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct LoginConfig {
+    /// The deployment's GitHub OAuth app, for GitHub's device flow.
+    pub github_client_id: String,
+    /// OAuth scopes to request; the Worker needs them to check membership.
+    pub scope: String,
+}
+
+/// Body of `POST /v1/login`. The Worker accepts only a token its own OAuth app
+/// issued, and issues a credential only once GitHub confirms revoking it. A
+/// refused request also revokes it, except a rate-limit refusal, a body that
+/// is too large or not JSON, a token of another app, and a revocation GitHub
+/// does not confirm.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineLogin {
+    /// A GitHub token from the device flow. The Worker checks who it belongs
+    /// to, revokes it, and never stores it.
+    pub github_token: String,
+    /// The machine name, such as `studio`.
+    pub machine: String,
+}
+
+/// Response of `POST /v1/login`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineToken {
+    /// The machine credential. Shown once; the Worker stores only its hash.
+    pub credential: String,
+    /// The machine name.
+    pub machine: String,
+    /// GitHub login of the person who logged in, who owns the machine.
+    pub owner: String,
+}
+
 /// Renders the TypeScript types the Worker imports.
 ///
 /// # Errors
@@ -561,7 +604,10 @@ fn typescript() -> Result<String, specta_typescript::Error> {
         .register::<Ask>()
         .register::<AskList>()
         .register::<EventList>()
-        .register::<ErrorBody>();
+        .register::<ErrorBody>()
+        .register::<LoginConfig>()
+        .register::<MachineLogin>()
+        .register::<MachineToken>();
     specta_typescript::Typescript::default().export(&types, specta_serde::Format)
 }
 

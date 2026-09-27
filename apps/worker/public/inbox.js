@@ -6,7 +6,8 @@
 /** @typedef {import("../src/protocol.gen.ts").AskOption} AskOption */
 /** @typedef {{ ask: Ask, reason: "not_delivered" | "not_finished" }} Stalled */
 /** @typedef {{ login: string, githubId: number, ntfyTopic: string | null, pushes: boolean, passkeys: { id: string, createdAt: number, lastUsedAt: number | null }[] }} Me */
-/** @typedef {{ id: string, name: string, pickupMinutes: number, completionMinutes: number, createdBy: string | null, createdAt: number, disabledAt: number | null, tokens: { id: string, createdAt: number, revokedAt: number | null }[] }} RequesterView */
+/** @typedef {{ id: string, name: string, pickupMinutes: number, completionMinutes: number, createdBy: string | null, createdAt: number, disabledAt: number | null, machine: string | null, tokens: { id: string, createdAt: number, revokedAt: number | null }[] }} RequesterView */
+/** @typedef {{ id: string, name: string, source: string, userAgent: string | null, createdAt: number, requesters: { id: string, name: string, disabledAt: number | null }[] }} MachineView */
 /** @typedef {"inbox" | "history" | "settings"} View */
 
 const state = {
@@ -821,11 +822,50 @@ async function addPasskey() {
 
 // ---- Settings --------------------------------------------------------------------
 
-async function renderSettings() {
+/** Pages of machines and requesters loaded so far in Settings. */
+const settingsPages = {
+  /** @type {MachineView[]} */ machines: [],
+  /** @type {string | null} */ machinesNext: null,
+  /** @type {RequesterView[]} */ requesters: [],
+  /** @type {string | null} */ requestersNext: null,
+};
+
+/** @param {string} path @param {string | null} after */
+function paged(path, after) {
+  return api(
+    "GET",
+    after ? `${path}?after=${encodeURIComponent(after)}` : path,
+  );
+}
+
+/**
+ * Renders Settings from the first pages, or after loading one more page of
+ * machines or requesters.
+ * @param {"first" | "machines" | "requesters"} [load]
+ */
+async function renderSettings(load = "first") {
   const me = state.me;
   if (!me) return;
-  /** @type {{ requesters: RequesterView[], truncated: boolean }} */
-  const { requesters, truncated } = await api("GET", "/v1/inbox/requesters");
+  const pages = settingsPages;
+  if (load === "first") {
+    const [r, m] = await Promise.all([
+      paged("/v1/inbox/requesters", null),
+      paged("/v1/inbox/machines", null),
+    ]);
+    pages.requesters = r.requesters;
+    pages.requestersNext = r.next;
+    pages.machines = m.machines;
+    pages.machinesNext = m.next;
+  } else if (load === "machines") {
+    const m = await paged("/v1/inbox/machines", pages.machinesNext);
+    pages.machines = [...pages.machines, ...m.machines];
+    pages.machinesNext = m.next;
+  } else {
+    const r = await paged("/v1/inbox/requesters", pages.requestersNext);
+    pages.requesters = [...pages.requesters, ...r.requesters];
+    pages.requestersNext = r.next;
+  }
+  const { machines, requesters } = pages;
   const topic = /** @type {HTMLInputElement} */ (
     el("input", {
       value: me.ntfyTopic ?? "",
@@ -907,13 +947,92 @@ async function renderSettings() {
     el(
       "section",
       {},
+      el("h2", {}, "Machines"),
+      el(
+        "p",
+        {},
+        "Each machine logs in once with roger login. Its automations name themselves with --as and become requesters under the machine's name, created on first use. Any process on a machine can act as any of its requesters. Disable a requester to stop one automation; revoke the machine to stop all of them.",
+      ),
+      machines.length
+        ? el(
+            "table",
+            {},
+            el(
+              "tr",
+              {},
+              el("th", {}, "Machine"),
+              el("th", {}, "Requesters"),
+              el("th", {}),
+            ),
+            ...machines.map((m) =>
+              el(
+                "tr",
+                {},
+                el(
+                  "td",
+                  {},
+                  m.name,
+                  el(
+                    "div",
+                    { class: "none" },
+                    `Logged in ${when(m.createdAt)} from ${m.source}${m.userAgent ? ` (${m.userAgent})` : ""}`,
+                  ),
+                ),
+                el(
+                  "td",
+                  {},
+                  ...m.requesters.map((r) =>
+                    el(
+                      "div",
+                      {},
+                      `${r.name} `,
+                      r.disabledAt
+                        ? "(disabled)"
+                        : el(
+                            "button",
+                            {
+                              class: "quiet",
+                              onclick: () => void disable(r.id),
+                            },
+                            "Disable",
+                          ),
+                    ),
+                  ),
+                ),
+                el(
+                  "td",
+                  {},
+                  el(
+                    "button",
+                    { class: "quiet", onclick: () => void revokeMachine(m.id) },
+                    "Revoke",
+                  ),
+                ),
+              ),
+            ),
+          )
+        : el(
+            "p",
+            { class: "none" },
+            "No machine is logged in. Run roger login on one.",
+          ),
+      pages.machinesNext
+        ? el(
+            "button",
+            { class: "quiet", onclick: () => void renderSettings("machines") },
+            "More machines",
+          )
+        : null,
+    ),
+    el(
+      "section",
+      {},
       el("h2", {}, "Your requesters"),
       el(
         "p",
         {},
-        "Each automation gets its own requester and token. Its Asks come to you unless they name someone with --to. Only you can issue or revoke its tokens.",
+        "Requesters with their own token, for automations that do not use roger login. Its Asks come to you unless they name someone with --to. Only you can issue or revoke its tokens. Adopt one to a logged-in machine to keep it there under --as <name>; its tokens keep working.",
       ),
-      truncated ? el("p", { class: "none" }, "Showing the first 100.") : null,
       el(
         "table",
         {},
@@ -928,7 +1047,26 @@ async function renderSettings() {
           el(
             "tr",
             {},
-            el("td", {}, r.name, r.disabledAt ? " (disabled)" : ""),
+            el(
+              "td",
+              {},
+              r.name,
+              r.disabledAt ? " (disabled)" : "",
+              r.machine
+                ? el(
+                    "div",
+                    { class: "none" },
+                    `Adopted by ${r.machine} `,
+                    el(
+                      "button",
+                      { class: "quiet", onclick: () => void release(r.id) },
+                      "Release",
+                    ),
+                  )
+                : !r.disabledAt && !r.name.includes("/") && machines.length
+                  ? adoptForm(r.id, machines)
+                  : null,
+            ),
             el(
               "td",
               {},
@@ -968,6 +1106,16 @@ async function renderSettings() {
           ),
         ),
       ),
+      pages.requestersNext
+        ? el(
+            "button",
+            {
+              class: "quiet",
+              onclick: () => void renderSettings("requesters"),
+            },
+            "More requesters",
+          )
+        : null,
       el(
         "div",
         { class: "inline-form" },
@@ -1020,6 +1168,65 @@ async function issue(id, name, into) {
 async function revoke(id) {
   try {
     await api("POST", `/v1/inbox/tokens/${id}/revoke`);
+    await renderSettings();
+  } catch (error) {
+    notify(error instanceof Error ? error.message : String(error), true);
+  }
+}
+
+/**
+ * @param {string} requesterId
+ * @param {MachineView[]} machines
+ */
+function adoptForm(requesterId, machines) {
+  const select = /** @type {HTMLSelectElement} */ (
+    el(
+      "select",
+      { "aria-label": "Machine to adopt it" },
+      ...machines.map((m) => el("option", { value: m.id }, m.name)),
+    )
+  );
+  return el(
+    "div",
+    {},
+    select,
+    el(
+      "button",
+      {
+        class: "quiet",
+        onclick: async () => {
+          try {
+            await api("POST", `/v1/inbox/requesters/${requesterId}/adopt`, {
+              machineId: select.value,
+            });
+            await renderSettings();
+          } catch (error) {
+            notify(
+              error instanceof Error ? error.message : String(error),
+              true,
+            );
+          }
+        },
+      },
+      "Adopt",
+    ),
+  );
+}
+
+/** @param {string} id */
+async function release(id) {
+  try {
+    await api("POST", `/v1/inbox/requesters/${id}/release`);
+    await renderSettings();
+  } catch (error) {
+    notify(error instanceof Error ? error.message : String(error), true);
+  }
+}
+
+/** @param {string} id */
+async function revokeMachine(id) {
+  try {
+    await api("POST", `/v1/inbox/machines/${id}/revoke`);
     await renderSettings();
   } catch (error) {
     notify(error instanceof Error ? error.message : String(error), true);

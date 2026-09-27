@@ -3,6 +3,10 @@ import type { Requester, Responder } from "./store.ts";
 
 export const SESSION_MS = 8 * 60 * 60_000;
 export const CHALLENGE_MS = 5 * 60_000;
+/** Expected minutes from answer to delivered, unless a requester sets its own. */
+export const DEFAULT_PICKUP_MINUTES = 120;
+/** Expected minutes from delivered to terminal, unless a requester sets its own. */
+export const DEFAULT_COMPLETION_MINUTES = 24 * 60;
 
 export type ChallengePurpose = "answer" | "register" | "step_up";
 
@@ -23,6 +27,8 @@ export interface RequesterView {
   createdBy: string | null;
   createdAt: number;
   disabledAt: number | null;
+  /** The machine name it was adopted to, if any. */
+  machine: string | null;
   tokens: { id: string; createdAt: number; revokedAt: number | null }[];
 }
 
@@ -227,21 +233,24 @@ export class Accounts {
   }
 
   /**
-   * The requesters `owner` created, enabled first, at most `limit`, each with
-   * its 20 most recent tokens. `truncated` says whether more exist.
+   * A page of the requesters `owner` created that are not a machine's own,
+   * by name, at most `limit`, each with its 20 most recent tokens. Pass
+   * `next` as `after` for the following page; `null` on the last.
    */
   async requesters(
     owner: number,
     limit: number,
-  ): Promise<{ requesters: RequesterView[]; truncated: boolean }> {
+    after: string | null,
+  ): Promise<{ requesters: RequesterView[]; next: string | null }> {
     const listed = await this.db
       .prepare(
         `SELECT r.*, p.login AS created_by_login FROM requesters r
          LEFT JOIN responders p ON p.github_id = r.created_by
-         WHERE r.created_by = ?
-         ORDER BY r.disabled_at IS NOT NULL, r.name LIMIT ?`,
+         WHERE r.created_by = ? AND (instr(r.name, '/') = 0 OR r.machine IS NULL)
+           AND r.name > ?
+         ORDER BY r.name LIMIT ?`,
       )
-      .bind(owner, limit + 1)
+      .bind(owner, after ?? "", limit + 1)
       .all();
     const page = listed.results.slice(0, limit);
     const tokens = await this.db
@@ -263,6 +272,7 @@ export class Accounts {
       created_by_login: string | null;
       created_at: number;
       disabled_at: number | null;
+      machine: string | null;
     };
     type TokenRow = {
       id: string;
@@ -277,7 +287,10 @@ export class Accounts {
       byRequester.set(t.requester_id, list);
     }
     return {
-      truncated: listed.results.length > limit,
+      next:
+        listed.results.length > limit
+          ? ((page.at(-1) as { name: string } | undefined)?.name ?? null)
+          : null,
       requesters: (page as Row[]).map((r) => ({
         id: r.id,
         name: r.name,
@@ -286,6 +299,7 @@ export class Accounts {
         createdBy: r.created_by_login,
         createdAt: r.created_at,
         disabledAt: r.disabled_at,
+        machine: r.machine,
         tokens: byRequester.get(r.id) ?? [],
       })),
     };

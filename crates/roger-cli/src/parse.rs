@@ -43,6 +43,97 @@ impl fmt::Display for AskId {
     }
 }
 
+/// The automation a machine credential acts for, from `--as` or
+/// `ROGER_REQUESTER`, such as `merge-gate`. The Worker makes it the requester
+/// `<machine>/<name>`. Same rule as the Worker: lowercase letters, digits, and
+/// `._@-`, starting with a letter or digit, at most 80 characters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequesterName(String);
+
+impl RequesterName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for RequesterName {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        if lowercase_name(s, 80, b"._@-") {
+            Ok(Self(s.to_owned()))
+        } else {
+            Err(Error::InvalidRequesterName(s.to_owned()))
+        }
+    }
+}
+
+impl fmt::Display for RequesterName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A machine name for `roger login`, such as `studio`: lowercase letters,
+/// digits, and `-`, starting with a letter or digit, at most 40 characters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineName(String);
+
+impl MachineName {
+    const MAX_LEN: usize = 40;
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// A suggestion from a host name such as `Studio.local`: the first label,
+    /// lowercased, with other characters turned into `-`. `None` if nothing
+    /// usable is left.
+    pub fn from_host(host: &str) -> Option<Self> {
+        let label = host.trim().split('.').next().unwrap_or_default();
+        let cleaned: String = label
+            .chars()
+            .map(|c| {
+                let c = c.to_ascii_lowercase();
+                if c.is_ascii_lowercase() || c.is_ascii_digit() {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .take(Self::MAX_LEN)
+            .collect();
+        cleaned.trim_start_matches('-').parse().ok()
+    }
+}
+
+impl FromStr for MachineName {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        if lowercase_name(s, Self::MAX_LEN, b"-") {
+            Ok(Self(s.to_owned()))
+        } else {
+            Err(Error::InvalidMachineName(s.to_owned()))
+        }
+    }
+}
+
+impl fmt::Display for MachineName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// `[a-z0-9]` followed by `[a-z0-9]` or any of `extra`, at most `max` bytes.
+fn lowercase_name(s: &str, max: usize, extra: &[u8]) -> bool {
+    let plain = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    let mut bytes = s.bytes();
+    s.len() <= max
+        && bytes.next().is_some_and(plain)
+        && bytes.all(|b| plain(b) || extra.contains(&b))
+}
+
 /// Parses `id:decision:label`. The label may contain `:`.
 pub fn parse_option(value: &str) -> Result<AskOption> {
     let invalid = |reason| Error::InvalidOption {
@@ -358,5 +449,35 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn requester_names_follow_the_worker_rule() {
+        for ok in ["default", "merge-gate", "orca@studio", "a.b_c", "x"] {
+            assert_eq!(
+                ok.parse::<RequesterName>().ok().map(|n| n.to_string()),
+                Some(ok.to_owned())
+            );
+        }
+        for bad in ["", "Merge", "a/b", "-lead", "a b", &"a".repeat(81)] {
+            assert!(bad.parse::<RequesterName>().is_err(), "{bad}");
+        }
+        assert!("a".repeat(80).parse::<RequesterName>().is_ok());
+    }
+
+    #[test]
+    fn machine_names_come_from_host_names() {
+        let suggest = |host: &str| MachineName::from_host(host).map(|n| n.to_string());
+        assert_eq!(suggest("Studio.local"), Some("studio".to_owned()));
+        assert_eq!(
+            suggest("Davids-MacBook_Pro"),
+            Some("davids-macbook-pro".to_owned())
+        );
+        assert_eq!(suggest("--build01"), Some("build01".to_owned()));
+        assert_eq!(suggest(""), None);
+        assert_eq!(suggest("..."), None);
+        assert_eq!(suggest(&"x".repeat(60)).map(|n| n.len()), Some(40));
+        assert!("a_b".parse::<MachineName>().is_err());
+        assert!("studio".parse::<MachineName>().is_ok());
     }
 }

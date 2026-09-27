@@ -6,16 +6,29 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand};
 use roger_protocol::{AskOption, Kind, Link, ReportedEvent, Risk, Urgency};
 
-use crate::parse::{AskId, parse_duration, parse_link, parse_option, parse_ref};
+use crate::parse::{
+    AskId, MachineName, RequesterName, parse_duration, parse_link, parse_option, parse_ref,
+};
 
 const LONG_ABOUT: &str = "\
 Ask a person for a decision and read the answer back.
 
+Log in once per machine with `roger login`, which signs in with GitHub.
+Each automation then names itself with --as, and Roger resolves it to the
+requester <machine>/<name>, created on first use. Without a name, calls act
+as <machine>/default. Any process that can read this machine's login can act
+as any of its requesters.
+
 Configuration comes from the environment:
-  ROGER_TOKEN        agent token
-  ROGER_TOKEN_FILE   file holding the token, used when ROGER_TOKEN is unset;
-                     defaults to ~/.config/roger/token
+  ROGER_REQUESTER    automation name, used when --as is not given
+  ROGER_TOKEN        requester token; used instead of the login
+  ROGER_TOKEN_FILE   file holding a requester token, used when ROGER_TOKEN is
+                     unset; also used instead of the login
   ROGER_URL          API base URL (default https://roger.origin89.com)
+
+Credentials are read in this order: ROGER_TOKEN, ROGER_TOKEN_FILE, a token in
+~/.config/roger/token, then the login in ~/.config/roger/credentials. --as
+works only with a login.
 
 `get` and `wait` print the Ask as JSON and exit with:
   0   answered with an `approve` decision
@@ -31,12 +44,39 @@ Other commands exit 0 on success and 1 on error.";
 #[derive(Debug, Parser)]
 #[command(name = "roger", version, about = "Ask a person for a decision and read the answer back.", long_about = LONG_ABOUT)]
 pub struct Cli {
+    /// Automation this call acts for, such as `merge-gate`; becomes the
+    /// requester `<machine>/<name>`. Needs `roger login`. Default: `default`.
+    #[arg(long = "as", global = true, value_name = "NAME")]
+    pub requester: Option<RequesterName>,
     #[command(subcommand)]
     pub command: Command,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    #[command(flatten)]
+    Api(ApiCommand),
+    /// Log this machine in with GitHub's device flow; the machine credential
+    /// is saved to ~/.config/roger/credentials. Replaces an earlier login of
+    /// this machine.
+    Login {
+        /// Machine name, such as `studio`. Default: this host's name.
+        #[arg(long)]
+        machine: Option<MachineName>,
+    },
+    /// Revoke this machine's login and delete the saved credential.
+    Logout,
+    /// Print an agent skill for this version: `roger` (default), or an
+    /// integration such as `orca`.
+    Skill {
+        /// Skill name; omit for the core skill.
+        name: Option<String>,
+    },
+}
+
+/// Commands that call the agent API with a credential.
+#[derive(Debug, Subcommand)]
+pub enum ApiCommand {
     /// Create an Ask and print it. Repeating the same --idem returns the existing Ask.
     Ask(Box<AskArgs>),
     /// Print an Ask; the exit code reports its outcome.
@@ -54,12 +94,6 @@ pub enum Command {
     Withdraw { id: AskId },
     /// Record what happened after an answer.
     Trace(TraceArgs),
-    /// Print an agent skill for this version: `roger` (default), or an
-    /// integration such as `orca`.
-    Skill {
-        /// Skill name; omit for the core skill.
-        name: Option<String>,
-    },
 }
 
 #[derive(Debug, Args)]
@@ -227,7 +261,7 @@ mod tests {
             "branch=x",
         ]);
         match parsed.map(|cli| cli.command) {
-            Ok(Command::Trace(args)) => {
+            Ok(Command::Api(ApiCommand::Trace(args))) => {
                 assert_eq!(args.event, ReportedEvent::Dispatched);
                 assert_eq!(args.refs.len(), 2);
             }
@@ -263,5 +297,22 @@ mod tests {
         assert!(
             Cli::try_parse_from(base.iter().chain(&["--body", "x", "--body-file", "-"])).is_err()
         );
+    }
+
+    #[test]
+    fn as_is_global_and_validated() {
+        let parsed = Cli::try_parse_from(["roger", "list", "--open", "--as", "merge-gate"]);
+        assert_eq!(
+            parsed
+                .ok()
+                .and_then(|cli| cli.requester)
+                .map(|n| n.to_string()),
+            Some("merge-gate".to_owned())
+        );
+        let before = Cli::try_parse_from(["roger", "--as", "merge-gate", "get", "abc"]);
+        assert!(before.is_ok());
+        assert!(Cli::try_parse_from(["roger", "list", "--open", "--as", "Merge/Gate"]).is_err());
+        assert!(Cli::try_parse_from(["roger", "login", "--machine", "studio"]).is_ok());
+        assert!(Cli::try_parse_from(["roger", "login", "--machine", "Studio!"]).is_err());
     }
 }

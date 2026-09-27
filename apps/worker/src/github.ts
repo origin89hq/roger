@@ -16,9 +16,23 @@ export interface GitHub {
     team: string,
     login: string,
   ): Promise<Membership>;
+  /**
+   * Who a token belongs to, only if this app issued it: a personal access
+   * token or another app's token is `foreign` (GitHub's 404). Any other
+   * status or a malformed answer is `unavailable`.
+   */
+  appUser(token: string): Promise<Responder | "foreign" | "unavailable">;
+  /**
+   * Revokes an access token this app issued, so one handed over by
+   * `roger login` cannot be used again: `revoked` on GitHub's 204, `gone`
+   * when GitHub answers 404 and a check confirms the token does not exist,
+   * and `unavailable` otherwise.
+   */
+  revoke(token: string): Promise<Revocation>;
 }
 
 export type Membership = "active" | "none" | "unavailable";
+export type Revocation = "revoked" | "gone" | "unavailable";
 
 const TIMEOUT_MS = 10_000;
 
@@ -33,6 +47,52 @@ export function githubApi(clientId: string, clientSecret: string): GitHub {
       },
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
+  // The app's own credentials, for the token endpoints under /applications.
+  const appHeaders = {
+    accept: "application/vnd.github+json",
+    authorization: `Basic ${btoa(`${clientId}:${clientSecret}`)}`,
+    "user-agent": "roger",
+    "x-github-api-version": "2022-11-28",
+  };
+  /**
+   * Who a token belongs to, only if this app issued it. Only 200 with a
+   * well-formed user is an answer, and only 404 means the token is not this
+   * app's; anything else is `unavailable`.
+   */
+  async function checkToken(
+    token: string,
+  ): Promise<Responder | "foreign" | "unavailable"> {
+    try {
+      const response = await fetch(
+        `https://api.github.com/applications/${encodeURIComponent(clientId)}/token`,
+        {
+          method: "POST",
+          headers: { ...appHeaders, "content-type": "application/json" },
+          body: JSON.stringify({ access_token: token }),
+          signal: AbortSignal.timeout(TIMEOUT_MS),
+        },
+      );
+      if (response.status === 404) return "foreign";
+      if (response.status !== 200) return "unavailable";
+      const body: unknown = await response.json();
+      const user =
+        typeof body === "object" && body !== null && "user" in body
+          ? body.user
+          : null;
+      if (
+        typeof user === "object" &&
+        user !== null &&
+        "id" in user &&
+        Number.isSafeInteger(user.id) &&
+        "login" in user &&
+        typeof user.login === "string"
+      )
+        return { githubId: Number(user.id), login: user.login };
+      return "unavailable";
+    } catch {
+      return "unavailable";
+    }
+  }
   return {
     async exchange(code, redirectUri) {
       const response = await fetch(
@@ -75,6 +135,31 @@ export function githubApi(clientId: string, clientSecret: string): GitHub {
       )
         return { githubId: Number(body.id), login: body.login };
       return null;
+    },
+    appUser: checkToken,
+    async revoke(token) {
+      let status: number;
+      try {
+        const response = await fetch(
+          `https://api.github.com/applications/${encodeURIComponent(clientId)}/token`,
+          {
+            method: "DELETE",
+            headers: { ...appHeaders, "content-type": "application/json" },
+            body: JSON.stringify({ access_token: token }),
+            signal: AbortSignal.timeout(TIMEOUT_MS),
+          },
+        );
+        status = response.status;
+      } catch {
+        return "unavailable";
+      }
+      if (status === 204) return "revoked";
+      // A 404 counts only once GitHub also says the token does not exist.
+      if (status === 404) {
+        const check = await checkToken(token);
+        return check === "foreign" ? "gone" : "unavailable";
+      }
+      return "unavailable";
     },
     async teamMembership(token, org, team, login) {
       let response: Response;
