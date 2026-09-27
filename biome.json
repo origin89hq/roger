@@ -25,5 +25,8 @@
         "organizeImports": "on"
       }
     }
+  },
+  "files": {
+    "includes": ["**", "!**/protocol.gen.ts", "!**/public/brand"]
   }
 }

@@ -28,3 +28,17 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
       - run: git diff --exit-code
+
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      # rustup installs the toolchain pinned in rust-toolchain.toml.
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # Also fails if apps/worker/src/protocol.gen.ts is stale.
+      - run: cargo test --locked --workspace
+      - run: git diff --exit-code
