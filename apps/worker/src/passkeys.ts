@@ -152,6 +152,7 @@ export class Passkeys {
       if (!result.verified)
         return { ok: false, message: "The passkey assertion did not verify." };
       await this.accounts.usePasskey(
+        who.githubId,
         key.id,
         result.authenticationInfo.newCounter,
         now,

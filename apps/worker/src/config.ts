@@ -22,7 +22,7 @@ export interface Config {
 export interface ConfigEnv {
   APP_ORIGIN: string;
   GITHUB_CLIENT_ID: string;
-  GITHUB_CLIENT_SECRET?: string;
+  GITHUB_CLIENT_SECRET: string;
   GITHUB_ORG: string;
   GITHUB_TEAM: string;
   NTFY_URL: string;
@@ -161,9 +161,12 @@ export function addWorkingMinutes(
 ): number {
   let t = from;
   let remaining = minutes * MINUTE;
-  // Each pass either consumes a working window or skips to the next one, so a
-  // month of working time needs well under this many passes.
-  for (let pass = 0; pass < 2000; pass++) {
+  // Each pass consumes a working window or skips to the next one: at most
+  // three passes per calendar day, and the span in days follows from the
+  // working minutes per week.
+  const perWeek = (s.end - s.start) * s.days.size;
+  const maxPasses = 3 * (Math.ceil((minutes / perWeek) * 7) + 7);
+  for (let pass = 0; pass < maxPasses; pass++) {
     if (remaining <= 0) return t;
     const c = localClock(t, s.timeZone);
     const intoMinute = t % MINUTE;

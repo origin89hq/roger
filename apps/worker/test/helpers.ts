@@ -2,7 +2,7 @@ import { env } from "cloudflare:test";
 import { Accounts } from "../src/accounts.ts";
 import { createApp, type Services } from "../src/app.ts";
 import { type Config, readSchedule } from "../src/config.ts";
-import type { GitHub } from "../src/github.ts";
+import type { GitHub, Membership } from "../src/github.ts";
 import { base64url } from "../src/ids.ts";
 import type { Notifier, Push } from "../src/notify.ts";
 import { Passkeys } from "../src/passkeys.ts";
@@ -45,13 +45,16 @@ export class FakeGitHub implements GitHub {
   async user(token: string) {
     return this.users.get(token) ?? null;
   }
-  async isTeamMember(
+  /** Set to make the membership check fail as a GitHub outage would. */
+  outage = false;
+  async teamMembership(
     _token: string,
     _org: string,
     _team: string,
     login: string,
-  ) {
-    return this.members.has(login);
+  ): Promise<Membership> {
+    if (this.outage) return "unavailable";
+    return this.members.has(login) ? "active" : "none";
   }
 }
 

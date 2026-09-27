@@ -43,7 +43,15 @@ async function api(method, path, body) {
   }
   const response = await fetch(path, init);
   const text = await response.text();
-  const data = text ? JSON.parse(text) : null;
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    throw new ApiError(
+      response.status,
+      `Unexpected response (${response.status}).`,
+    );
+  }
   if (!response.ok) {
     if (response.status === 401) showSignedOut();
     throw new ApiError(
@@ -773,14 +781,22 @@ async function issue(id, name, into) {
 
 /** @param {string} id */
 async function revoke(id) {
-  await api("POST", `/v1/inbox/tokens/${id}/revoke`);
-  await renderSettings();
+  try {
+    await api("POST", `/v1/inbox/tokens/${id}/revoke`);
+    await renderSettings();
+  } catch (error) {
+    notify(error instanceof Error ? error.message : String(error), true);
+  }
 }
 
 /** @param {string} id */
 async function disable(id) {
-  await api("POST", `/v1/inbox/requesters/${id}/disable`);
-  await renderSettings();
+  try {
+    await api("POST", `/v1/inbox/requesters/${id}/disable`);
+    await renderSettings();
+  } catch (error) {
+    notify(error instanceof Error ? error.message : String(error), true);
+  }
 }
 
 // ---- Loading and navigation ----------------------------------------------------------
@@ -902,9 +918,9 @@ document.addEventListener("keydown", (event) => {
     default:
       if (/^[1-8]$/.test(event.key)) {
         // Only options that do not approve have number keys.
-        document
-          .querySelector(`.options button[data-key="${event.key}"]`)
-          ?.dispatchEvent(new MouseEvent("click"));
+        /** @type {HTMLButtonElement | null} */ (
+          document.querySelector(`.options button[data-key="${event.key}"]`)
+        )?.click();
       }
   }
 });

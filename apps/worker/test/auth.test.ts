@@ -112,6 +112,16 @@ describe("sign-in", () => {
     expect(await count("sessions", "github_id = ?", user.githubId)).toBe(0);
   });
 
+  it("asks to retry when GitHub cannot confirm membership, and creates no session", async () => {
+    const svc = services();
+    const user = githubUser(svc, true);
+    svc.github.outage = true;
+    const response = await callback(svc, `code=${user.code}&state=s`, "s");
+    expect(response.status).toBe(503);
+    expect(setCookie(response, "__Host-roger")).toBeNull();
+    expect(await count("sessions", "github_id = ?", user.githubId)).toBe(0);
+  });
+
   it("signs in a team member with a strict session cookie", async () => {
     const svc = services();
     const user = githubUser(svc, true);

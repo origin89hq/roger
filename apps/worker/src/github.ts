@@ -5,14 +5,20 @@ export interface GitHub {
   /** Exchanges an OAuth code for an access token, or `null` if GitHub refuses it. */
   exchange(code: string, redirectUri: string): Promise<string | null>;
   user(token: string): Promise<Responder | null>;
-  /** Whether `login` is an active member of the team. Any failure counts as no. */
-  isTeamMember(
+  /**
+   * Whether `login` is an active member of the team. GitHub's 403 and 404
+   * count as no; any other failure is `unavailable`, so a GitHub outage is not
+   * reported as a refusal.
+   */
+  teamMembership(
     token: string,
     org: string,
     team: string,
     login: string,
-  ): Promise<boolean>;
+  ): Promise<Membership>;
 }
+
+export type Membership = "active" | "none" | "unavailable";
 
 const TIMEOUT_MS = 10_000;
 
@@ -70,19 +76,25 @@ export function githubApi(clientId: string, clientSecret: string): GitHub {
         return { githubId: Number(body.id), login: body.login };
       return null;
     },
-    async isTeamMember(token, org, team, login) {
-      const response = await api(
-        token,
-        `/orgs/${encodeURIComponent(org)}/teams/${encodeURIComponent(team)}/memberships/${encodeURIComponent(login)}`,
-      );
-      if (!response.ok) return false;
+    async teamMembership(token, org, team, login) {
+      let response: Response;
+      try {
+        response = await api(
+          token,
+          `/orgs/${encodeURIComponent(org)}/teams/${encodeURIComponent(team)}/memberships/${encodeURIComponent(login)}`,
+        );
+      } catch {
+        return "unavailable";
+      }
+      if (response.status === 403 || response.status === 404) return "none";
+      if (!response.ok) return "unavailable";
       const body: unknown = await response.json();
-      return (
-        typeof body === "object" &&
+      return typeof body === "object" &&
         body !== null &&
         "state" in body &&
         body.state === "active"
-      );
+        ? "active"
+        : "none";
     },
   };
 }

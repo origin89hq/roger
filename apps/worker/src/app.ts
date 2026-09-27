@@ -599,8 +599,24 @@ export function createApp(svc: Services): Hono<Env> {
     if (!token || !user)
       return c.text("GitHub did not confirm who you are.", 403);
     const { org, team } = svc.config.github;
-    if (!(await svc.github.isTeamMember(token, org, team, user.login)))
-      return c.text(`Roger is limited to members of ${org}/${team}.`, 403);
+    const membership = await svc.github.teamMembership(
+      token,
+      org,
+      team,
+      user.login,
+    );
+    switch (membership) {
+      case "active":
+        break;
+      case "none":
+        return c.text(`Roger is limited to members of ${org}/${team}.`, 403);
+      case "unavailable":
+        return c.text("GitHub did not answer. Try signing in again.", 503);
+      default: {
+        const unreachable: never = membership;
+        throw new Error(`unknown membership ${String(unreachable)}`);
+      }
+    }
     const now = svc.now();
     await svc.accounts.upsertResponder(user, now);
     const session = await svc.accounts.createSession(user.githubId, now);

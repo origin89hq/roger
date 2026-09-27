@@ -131,8 +131,8 @@ describe("readConfig", () => {
   });
 
   it("rejects missing GitHub settings and bad schedules", () => {
-    const { GITHUB_CLIENT_SECRET: _, ...noSecret } = ENV;
-    expect(readConfig(noSecret)).toEqual(
+    // An unset secret reaches the Worker as a missing or empty value.
+    expect(readConfig({ ...ENV, GITHUB_CLIENT_SECRET: "" })).toEqual(
       expect.stringContaining("GITHUB_CLIENT_SECRET"),
     );
     expect(readConfig({ ...ENV, GITHUB_TEAM: "" })).toEqual(

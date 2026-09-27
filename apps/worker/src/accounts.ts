@@ -155,10 +155,17 @@ export class Accounts {
       .run();
   }
 
-  async usePasskey(id: string, counter: number, now: number): Promise<void> {
+  async usePasskey(
+    githubId: number,
+    id: string,
+    counter: number,
+    now: number,
+  ): Promise<void> {
     await this.db
-      .prepare("UPDATE passkeys SET counter = ?, last_used_at = ? WHERE id = ?")
-      .bind(counter, now, id)
+      .prepare(
+        "UPDATE passkeys SET counter = ?, last_used_at = ? WHERE id = ? AND github_id = ?",
+      )
+      .bind(counter, now, id, githubId)
       .run();
   }
 

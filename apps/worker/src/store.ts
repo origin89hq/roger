@@ -156,6 +156,8 @@ function stored<T>(text: string): T {
   return JSON.parse(text) as T;
 }
 
+// D1 reports constraint failures only in the message text, so match on it.
+// The idempotency and one-open-Ask tests fail if that text changes.
 function isUniqueViolation(error: unknown, columns: string): boolean {
   return (
     error instanceof Error &&
@@ -837,7 +839,7 @@ export class Store {
   async digestCandidates(): Promise<{ githubId: number; topic: string }[]> {
     const rows = await this.db
       .prepare(
-        "SELECT github_id, ntfy_topic FROM responders WHERE ntfy_topic IS NOT NULL",
+        "SELECT github_id, ntfy_topic FROM responders WHERE ntfy_topic IS NOT NULL ORDER BY github_id LIMIT 500",
       )
       .all<{ github_id: number; ntfy_topic: string }>();
     return rows.results.map((r) => ({
