@@ -17,6 +17,12 @@ export interface GitHub {
     login: string,
   ): Promise<Membership>;
   /**
+   * Who a token belongs to, only if this app issued it: a personal access
+   * token or another app's token is `foreign`. Any other failure is
+   * `unavailable`.
+   */
+  appUser(token: string): Promise<Responder | "foreign" | "unavailable">;
+  /**
    * Revokes an access token this app issued, so one handed over by
    * `roger login` cannot be used again. `false` if GitHub did not confirm.
    */
@@ -38,6 +44,13 @@ export function githubApi(clientId: string, clientSecret: string): GitHub {
       },
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
+  // The app's own credentials, for the token endpoints under /applications.
+  const appHeaders = {
+    accept: "application/vnd.github+json",
+    authorization: `Basic ${btoa(`${clientId}:${clientSecret}`)}`,
+    "user-agent": "roger",
+    "x-github-api-version": "2022-11-28",
+  };
   return {
     async exchange(code, redirectUri) {
       const response = await fetch(
@@ -81,19 +94,47 @@ export function githubApi(clientId: string, clientSecret: string): GitHub {
         return { githubId: Number(body.id), login: body.login };
       return null;
     },
+    async appUser(token) {
+      let response: Response;
+      try {
+        response = await fetch(
+          `https://api.github.com/applications/${encodeURIComponent(clientId)}/token`,
+          {
+            method: "POST",
+            headers: { ...appHeaders, "content-type": "application/json" },
+            body: JSON.stringify({ access_token: token }),
+            signal: AbortSignal.timeout(TIMEOUT_MS),
+          },
+        );
+      } catch {
+        return "unavailable";
+      }
+      // GitHub answers 404 or 422 for a token this app did not issue.
+      if (response.status === 404 || response.status === 422) return "foreign";
+      if (!response.ok) return "unavailable";
+      const body: unknown = await response.json();
+      const user =
+        typeof body === "object" && body !== null && "user" in body
+          ? body.user
+          : null;
+      if (
+        typeof user === "object" &&
+        user !== null &&
+        "id" in user &&
+        Number.isSafeInteger(user.id) &&
+        "login" in user &&
+        typeof user.login === "string"
+      )
+        return { githubId: Number(user.id), login: user.login };
+      return "unavailable";
+    },
     async revoke(token) {
       try {
         const response = await fetch(
           `https://api.github.com/applications/${encodeURIComponent(clientId)}/token`,
           {
             method: "DELETE",
-            headers: {
-              accept: "application/vnd.github+json",
-              authorization: `Basic ${btoa(`${clientId}:${clientSecret}`)}`,
-              "content-type": "application/json",
-              "user-agent": "roger",
-              "x-github-api-version": "2022-11-28",
-            },
+            headers: { ...appHeaders, "content-type": "application/json" },
             body: JSON.stringify({ access_token: token }),
             signal: AbortSignal.timeout(TIMEOUT_MS),
           },

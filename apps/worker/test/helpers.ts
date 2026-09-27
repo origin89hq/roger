@@ -57,6 +57,13 @@ export class FakeGitHub implements GitHub {
     if (this.outage) return "unavailable";
     return this.members.has(login) ? "active" : "none";
   }
+  /** Tokens issued to Roger's app; others, such as personal access tokens, are foreign. */
+  appTokens = new Set<string>();
+  async appUser(token: string) {
+    if (this.outage) return "unavailable" as const;
+    const user = this.users.get(token);
+    return user && this.appTokens.has(token) ? user : ("foreign" as const);
+  }
   /** Tokens revoked, in order. A revoked token no longer identifies anyone. */
   revoked: string[] = [];
   async revoke(token: string) {

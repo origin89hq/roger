@@ -35,6 +35,7 @@ function githubToken(
 ): string {
   const token = `gho_${crypto.randomUUID()}`;
   svc.github.users.set(token, { githubId: who.githubId, login: who.login });
+  svc.github.appTokens.add(token);
   if (member) svc.github.members.add(who.login);
   return token;
 }
@@ -199,6 +200,22 @@ describe("logging in", () => {
     expect(response.status).toBe(403);
     expect(await count("machines", "owner = ?", outsider.githubId)).toBe(0);
     expect(svc.github.revoked).toEqual([token]);
+  });
+
+  it("refuses a team member's token that Roger's app did not issue", async () => {
+    const svc = services();
+    const me = await person(svc);
+    // A personal access token of a team member: GitHub knows the user, but
+    // the token is not this app's.
+    const pat = `ghp_${crypto.randomUUID()}`;
+    svc.github.users.set(pat, { githubId: me.githubId, login: me.login });
+    svc.github.members.add(me.login);
+    const response = await exchange(svc, {
+      githubToken: pat,
+      machine: machineName(),
+    });
+    expect(response.status).toBe(401);
+    expect(await count("machines", "owner = ?", me.githubId)).toBe(0);
   });
 
   it("refuses a token GitHub does not accept", async () => {

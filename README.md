@@ -38,9 +38,14 @@ roger ask --as merge-gate ...    # or export ROGER_REQUESTER=merge-gate
 
 `roger login` signs in with GitHub's device flow, using the same OAuth app as
 the inbox (device flow must be enabled on it). The person enters the code on
-github.com. The CLI then sends the GitHub token once to the Worker, which runs
+github.com. The CLI asks only for `read:org`, which the team membership check
+needs, and sends the GitHub token once to the Worker. The Worker accepts only
+a token issued to its own OAuth app (a personal access token is refused), runs
 the same checks as inbox sign-in (who the person is and membership of
-`GITHUB_TEAM`), revokes the GitHub token, and returns a machine credential. The
+`GITHUB_TEAM`), revokes the GitHub token on every path, and returns a machine
+credential. Membership is checked at login only: removing someone from the
+team does not revoke their machines, so revoke those in Settings. The client
+secret stays a Worker secret; the CLI never sees it. The
 machine is named with `--machine`, defaulting to the host name, such as
 `studio`; a name belongs to one person while it is logged in. The CLI saves the
 machine credential to `~/.config/roger/credentials` with mode 0600; the Worker

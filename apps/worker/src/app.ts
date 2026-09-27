@@ -268,8 +268,10 @@ export function createApp(svc: Services): Hono<Env> {
 
   /**
    * Exchanges a GitHub token from the device flow for a machine credential.
-   * The same checks as signing in to the inbox, then the GitHub token is
-   * revoked and never stored.
+   * The token must have been issued to this app; then the same checks as
+   * signing in to the inbox. Team membership is checked here only: removing
+   * someone from the team does not revoke their machines, so revoke them in
+   * Settings. The GitHub token is revoked on every path and never stored.
    */
   agent.post("/login", async (c) => {
     // Per source, before GitHub is called. A deployment without the limiter
@@ -288,9 +290,17 @@ export function createApp(svc: Services): Hono<Env> {
     if (!body.ok) return body.response;
     const { githubToken, machine } = body.value;
     try {
-      const user = await svc.github.user(githubToken);
-      if (!user)
-        return failure(401, "unauthorized", "GitHub did not accept the login.");
+      // Only a token issued to this app through the device flow: a leaked
+      // personal access token or another app's token mints nothing.
+      const user = await svc.github.appUser(githubToken);
+      if (user === "unavailable")
+        return failure(503, "internal", "GitHub did not answer. Try again.");
+      if (user === "foreign")
+        return failure(
+          401,
+          "unauthorized",
+          "The GitHub token was not issued to Roger. Run roger login.",
+        );
       const { org, team } = svc.config.github;
       const membership = await svc.github.teamMembership(
         githubToken,
