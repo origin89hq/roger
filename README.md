@@ -24,3 +24,8 @@ Requires Node 24+, pnpm (pinned in `package.json`), and `just`.
 pnpm install
 just check
 ```
+
+## License
+
+Licensed under either [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at
+your option (`MIT OR Apache-2.0`).
