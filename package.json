@@ -1,0 +1,23 @@
+{
+  "name": "roger",
+  "private": true,
+  "type": "module",
+  "description": "One inbox for agents that need a person.",
+  "engines": {
+    "node": ">=24"
+  },
+  "packageManager": "pnpm@12.6.0",
+  "scripts": {
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "lint": "biome ci . --error-on-warnings",
+    "lint:fix": "biome check --write .",
+    "typecheck": "pnpm -r --if-present run typecheck",
+    "test": "pnpm -r --if-present run test",
+    "build": "pnpm -r --if-present run build",
+    "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.14"
+  }
+}
