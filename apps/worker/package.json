@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node scripts/brand.mjs && wrangler dev --port 8792",
+    "dev": "node scripts/brand.mjs && wrangler dev --port 8792 --local-upstream localhost:8792",
     "typecheck": "wrangler types && tsc --noEmit && tsc --noEmit -p public",
     "test": "vitest run",
     "build": "node scripts/brand.mjs && wrangler deploy --dry-run --outdir dist"

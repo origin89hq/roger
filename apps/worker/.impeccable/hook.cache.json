@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "sessions": {
+    "0e07628f-86c7-46be-ab49-7bdee37dd77c": {
+      "updatedAt": 1790513121189,
+      "files": {
+        "/Users/lemarier/orca/workspaces/origin89-roger/rfc-roger-one-inbox-for-agents-that-need-a-perso/apps/worker/public/inbox.css": {
+          "editCount": 1,
+          "findings": [],
+          "stopBaseline": {
+            "version": 1,
+            "engine": "0.1.6",
+            "counts": {
+              "f8083a646be982af512420aa81cefa8666dd197da7a6abcb598e1f42098cda30": 1
+            }
+          },
+          "cleanAcked": true
+        }
+      }
+    }
+  }
+}

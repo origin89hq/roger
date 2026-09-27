@@ -106,9 +106,10 @@ function notify(message, error = false) {
 /** @param {number} ms */
 function ago(ms) {
   const minutes = Math.max(0, Math.round((state.serverNow - ms) / 60000));
-  if (minutes < 60) return `${minutes} min`;
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
   const hours = Math.round(minutes / 60);
-  return hours < 48 ? `${hours} h` : `${Math.round(hours / 24)} d`;
+  return hours < 48 ? `${hours} h ago` : `${Math.round(hours / 24)} d ago`;
 }
 
 /** @param {number | null} ms */
@@ -121,16 +122,46 @@ function when(ms) {
       });
 }
 
+/** @param {number} ms */
+function clock(ms) {
+  return new Date(ms).toLocaleTimeString(undefined, { timeStyle: "short" });
+}
+
+const URGENCY_TEXT = { now: "Now", soon: "Soon", later: "Later", fyi: "FYI" };
+const RISK_TEXT = {
+  routine: "Routine",
+  sensitive: "Sensitive",
+  irreversible: "Irreversible",
+};
+const STATE_TEXT = {
+  open: "Waiting for you",
+  answered: "Answered",
+  expired: "Expired without an answer",
+  withdrawn: "Withdrawn by the requester",
+  superseded: "Replaced by a newer Ask",
+};
+const DECISION_TEXT = {
+  approve: "Approved",
+  reject: "Rejected",
+  other: "Answered",
+};
+
 /** @param {Ask} ask */
 function badges(ask) {
   return [
     el(
       "span",
-      { class: `badge ${ask.urgency}`, title: "urgency" },
-      ask.urgency,
+      { class: `badge urgency-${ask.urgency}`, title: "Urgency" },
+      URGENCY_TEXT[ask.urgency],
     ),
-    el("span", { class: `badge ${ask.risk}`, title: "risk" }, ask.risk),
-  ];
+    ask.risk === "routine"
+      ? null
+      : el(
+          "span",
+          { class: `badge risk-${ask.risk}`, title: "Risk" },
+          RISK_TEXT[ask.risk],
+        ),
+  ].filter((n) => n !== null);
 }
 
 /** @param {string} repo */
@@ -144,55 +175,72 @@ function repoLink(repo) {
 
 // ---- Lists -----------------------------------------------------------------------
 
-/** @param {Ask} ask @param {Node[]} extra */
-function row(ask, extra = []) {
+/** @param {Ask} ask @param {Node | null} status */
+function row(ask, status = null) {
   return el(
     "button",
     {
-      class: "row",
+      class: `row urgency-${ask.urgency}`,
       role: "option",
       "aria-selected": String(state.selected === ask.id),
       "data-id": ask.id,
       onclick: () => select(ask.id),
     },
-    el("span", { class: "title" }, ask.title),
+    el(
+      "span",
+      { class: "row-top" },
+      el("span", { class: "title" }, ask.title),
+      el("span", { class: "age" }, ago(ask.createdAt)),
+    ),
     el(
       "span",
       { class: "meta" },
       ...badges(ask),
-      ...extra,
-      el("span", {}, ask.requester),
-      ask.repo ? el("span", {}, `· ${ask.repo}`) : null,
-      el("span", {}, `· ${ago(ask.createdAt)}`),
+      status,
+      el("span", { class: "source" }, ask.repo ?? ask.requester),
     ),
+  );
+}
+
+/** @param {string} heading @param {string} hint */
+function emptyList(heading, hint) {
+  return el(
+    "div",
+    { class: "empty-list" },
+    el("p", { class: "empty-heading" }, heading),
+    el("p", {}, hint),
   );
 }
 
 function renderInboxList() {
   const list = $("list");
+  const heading =
+    state.openTotal > state.open.length
+      ? `${state.open.length} of ${state.openTotal} waiting, most urgent first`
+      : `${state.open.length} waiting`;
   list.replaceChildren(
-    el(
-      "h2",
-      {},
-      state.openTotal > state.open.length
-        ? `Open (${state.open.length} of ${state.openTotal}, most urgent first)`
-        : `Open (${state.open.length})`,
-    ),
+    el("h2", {}, heading),
     ...(state.open.length
       ? state.open.map((a) => row(a))
-      : [el("p", { class: "none" }, "Nothing is waiting for you.")]),
+      : [
+          emptyList(
+            "Nothing is waiting for you.",
+            "Agents ask with roger ask. New Asks appear here and, if you set a topic, on your phone.",
+          ),
+        ]),
   );
   if (state.stalled.length) {
     list.append(
-      el("h2", {}, `Stalled answers (${state.stalled.length})`),
+      el("h2", {}, `${state.stalled.length} answered but not finished`),
       ...state.stalled.map((s) =>
-        row(s.ask, [
+        row(
+          s.ask,
           el(
             "span",
             { class: "badge stalled" },
-            s.reason === "not_delivered" ? "not picked up" : "not finished",
+            s.reason === "not_delivered" ? "Not picked up" : "Not finished",
           ),
-        ]),
+        ),
       ),
     );
   }
@@ -203,18 +251,28 @@ function renderHistoryList() {
   list.replaceChildren(
     ...(state.history.length
       ? state.history.map((a) =>
-          row(a, [
-            el("span", { class: "badge" }, a.answer?.decision ?? a.state),
-          ]),
+          row(
+            a,
+            el(
+              "span",
+              { class: `badge outcome-${a.answer?.decision ?? a.state}` },
+              a.answer ? DECISION_TEXT[a.answer.decision] : STATE_TEXT[a.state],
+            ),
+          ),
         )
-      : [el("p", { class: "none" }, "No closed Asks yet.")]),
+      : [
+          emptyList(
+            "No closed Asks yet.",
+            "Asks you answer, and ones that expire or are withdrawn, are kept here.",
+          ),
+        ]),
   );
   if (state.historyNext)
     list.append(
       el(
         "button",
-        { class: "quiet", onclick: () => loadHistory(true) },
-        "Load more",
+        { class: "quiet more", onclick: () => loadHistory(true) },
+        "Load older",
       ),
     );
 }
@@ -228,6 +286,27 @@ function listed() {
 
 // ---- Detail ----------------------------------------------------------------------
 
+function detailPane() {
+  return state.view === "history" ? $("history-detail") : $("detail");
+}
+
+function renderEmptyDetail() {
+  const pane = detailPane();
+  pane.replaceChildren(
+    el(
+      "div",
+      { class: "detail-empty" },
+      el(
+        "p",
+        {},
+        state.view === "history"
+          ? "Pick a closed Ask to see its decision and what happened next."
+          : "Pick an Ask to answer it. Press j and k to move, ? for shortcuts.",
+      ),
+    ),
+  );
+}
+
 /** @param {Ask} ask */
 function renderDetail(ask) {
   const facts = el(
@@ -236,45 +315,47 @@ function renderDetail(ask) {
     el("dt", {}, "From"),
     el("dd", {}, ask.requester),
     el("dt", {}, "To"),
-    el("dd", {}, ask.to),
+    el("dd", {}, `@${ask.to}`),
     ...(ask.repo
       ? [el("dt", {}, "Repository"), el("dd", {}, repoLink(ask.repo))]
       : []),
-    el("dt", {}, "Decision"),
+    el("dt", {}, "Decision key"),
     el("dd", { class: "mono" }, ask.decisionKey),
     el("dt", {}, "Asked"),
-    el("dd", {}, `${when(ask.createdAt)} (${ago(ask.createdAt)} ago)`),
+    el("dd", {}, when(ask.createdAt)),
     ...(ask.expiresAt
       ? [el("dt", {}, "Expires"), el("dd", {}, when(ask.expiresAt))]
       : []),
-    el("dt", {}, "State"),
-    el("dd", {}, ask.state),
   );
   const action = ask.action
     ? el(
         "section",
         { class: "action" },
         el(
-          "h2",
-          {},
-          ask.kind === "approval" ? "Approving permits exactly this" : "Action",
+          "p",
+          { class: "action-lead" },
+          ask.kind === "approval"
+            ? "Approving permits exactly this:"
+            : "The requester intends to:",
         ),
         el(
-          "dl",
-          { class: "facts" },
-          el("dt", {}, "Verb"),
-          el("dd", { class: "mono" }, ask.action.verb),
-          el("dt", {}, "Target"),
-          el("dd", { class: "mono" }, ask.action.target),
-          el("dt", {}, "Revision"),
-          el("dd", { class: "mono" }, ask.action.rev),
-          ...(ask.action.limits
-            ? [el("dt", {}, "Limits"), el("dd", {}, ask.action.limits)]
-            : []),
+          "p",
+          { class: "action-line" },
+          el("span", { class: "verb" }, ask.action.verb),
+          " ",
+          el("span", { class: "mono" }, ask.action.target),
         ),
+        el(
+          "p",
+          { class: "rev" },
+          "at ",
+          el("span", { class: "mono" }, ask.action.rev),
+        ),
+        ask.action.limits
+          ? el("p", { class: "limits" }, ask.action.limits)
+          : null,
       )
     : null;
-  const detail = state.view === "history" ? $("history-detail") : $("detail");
   const parts = [
     el(
       "button",
@@ -288,13 +369,19 @@ function renderDetail(ask) {
       "← All Asks",
     ),
     el(
-      "div",
-      { class: "badges" },
-      ...badges(ask),
-      el("span", { class: "badge" }, ask.kind),
+      "header",
+      { class: "detail-head" },
+      el("div", { class: "badges" }, ...badges(ask)),
+      el("h1", {}, ask.title),
+      el(
+        "p",
+        { class: "byline" },
+        `${ask.requester} asked ${ago(ask.createdAt)}`,
+        ask.repo ? " in " : "",
+        ask.repo ? repoLink(ask.repo) : "",
+      ),
     ),
-    el("h1", {}, ask.title),
-    facts,
+    ask.state === "open" ? null : decided(ask),
     action,
     ask.body ? el("div", { class: "body" }, ask.body) : null,
     ask.links.length
@@ -314,20 +401,26 @@ function renderDetail(ask) {
           ),
         )
       : null,
-    ask.state === "open" ? answerForm(ask) : decided(ask),
+    ask.state === "open" ? answerForm(ask) : null,
+    el("details", { class: "more-facts" }, el("summary", {}, "Details"), facts),
   ];
-  detail.replaceChildren(...parts.filter((p) => p !== null));
-  detail.closest(".split")?.classList.add("showing");
+  const pane = detailPane();
+  pane.replaceChildren(...parts.filter((p) => p !== null));
+  pane.closest(".split")?.classList.add("showing");
 }
 
 /** @param {Ask} ask */
 function answerForm(ask) {
+  const needsInput = ask.options.some((o) => o.inputRequired);
   const input = /** @type {HTMLTextAreaElement} */ (
     el("textarea", {
       id: "answer-input",
       "aria-label": "Instructions",
-      placeholder: "Instructions (optional unless the option asks for them)",
+      placeholder: needsInput
+        ? "Instructions, required for the options marked with …"
+        : "Instructions for the requester (optional)",
       maxlength: "4000",
+      rows: "3",
     })
   );
   let key = 0;
@@ -337,7 +430,7 @@ function answerForm(ask) {
     return el(
       "button",
       {
-        class: approve ? "plate" : option.decision === "reject" ? "danger" : "",
+        class: `option decision-${option.decision}`,
         "data-option": option.id,
         "data-key": shortcut ?? "",
         onclick: (e) => {
@@ -346,78 +439,137 @@ function answerForm(ask) {
         },
       },
       shortcut ? el("kbd", {}, shortcut) : null,
-      approve ? `${option.label} (passkey)` : option.label,
+      option.label,
       option.inputRequired ? " …" : "",
     );
   });
+  const hasApprove = ask.options.some((o) => o.decision === "approve");
   return el(
-    "div",
+    "section",
     { class: "answer-form" },
+    el("h2", {}, "Your answer"),
     input,
     el("div", { class: "options" }, ...buttons),
+    hasApprove
+      ? el(
+          "p",
+          { class: "hint" },
+          "Approving asks for your passkey. Other answers do not.",
+        )
+      : null,
   );
+}
+
+/** @param {Ask} ask @param {import("../src/protocol.gen.ts").TraceEntry} t */
+function traceText(ask, t) {
+  switch (t.event) {
+    case "delivered":
+      return `${ask.requester} read the answer`;
+    case "dispatched":
+      return "Work started";
+    case "progress":
+      return "Progress";
+    case "applied":
+      return "Done";
+    case "failed":
+      return "Failed";
+    case "not_applicable":
+      return "No longer applies";
+    default:
+      return t.event;
+  }
 }
 
 /** @param {Ask} ask */
 function decided(ask) {
   const a = ask.answer;
-  const summary = a
-    ? el(
-        "p",
-        {},
-        el("strong", {}, `${a.decision}: ${a.optionLabel}`),
-        ` by @${a.responder}${a.passkey ? " with a passkey" : ""}, ${when(a.answeredAt)}`,
-      )
-    : el(
-        "p",
-        {},
-        el("strong", {}, ask.state),
-        ask.closedAt ? `, ${when(ask.closedAt)}` : "",
-      );
+  if (!a)
+    return el(
+      "section",
+      { class: `verdict verdict-${ask.state}` },
+      el("p", { class: "verdict-label" }, STATE_TEXT[ask.state]),
+      ask.closedAt
+        ? el("p", { class: "verdict-by" }, when(ask.closedAt))
+        : null,
+      ask.supersededBy
+        ? el(
+            "p",
+            { class: "verdict-by" },
+            "Replaced by ",
+            el(
+              "a",
+              {
+                href: `#${state.view === "history" ? "history" : "ask"}=${ask.supersededBy}`,
+              },
+              "the newer Ask",
+            ),
+          )
+        : null,
+    );
+  const terminal = ask.trace.some(
+    (t) =>
+      t.event === "applied" ||
+      t.event === "failed" ||
+      t.event === "not_applicable",
+  );
   return el(
     "section",
-    { class: "decided" },
-    summary,
-    a?.input ? el("div", { class: "body" }, a.input) : null,
-    ask.supersededBy
-      ? el("p", {}, "Replaced by ", el("code", {}, ask.supersededBy))
-      : null,
-    a
-      ? el(
-          "ol",
-          { class: "timeline" },
-          ...ask.trace.map((t) =>
+    { class: `verdict verdict-${a.decision}` },
+    el("p", { class: "verdict-kind" }, DECISION_TEXT[a.decision]),
+    el("p", { class: "verdict-label" }, a.optionLabel),
+    el(
+      "p",
+      { class: "verdict-by" },
+      `by @${a.responder}${a.passkey ? " with a passkey" : ""}, ${when(a.answeredAt)}`,
+    ),
+    a.input ? el("blockquote", { class: "verdict-input" }, a.input) : null,
+    el(
+      "ol",
+      { class: "rail", "aria-label": "What happened next" },
+      ...ask.trace.map((t) =>
+        el(
+          "li",
+          {
+            class: `step step-${t.event}${t.event === "failed" ? " bad" : ""}`,
+          },
+          el("time", { datetime: new Date(t.at).toISOString() }, clock(t.at)),
+          el(
+            "div",
+            {},
+            el("span", { class: "step-name" }, traceText(ask, t)),
+            t.note ? el("span", { class: "step-note" }, t.note) : null,
+            ...Object.entries(t.refs).map(([k, v]) =>
+              el("code", { class: "ref" }, `${k}=${v}`),
+            ),
+            t.url
+              ? el(
+                  "a",
+                  { href: t.url, rel: "noreferrer", target: "_blank" },
+                  "Evidence",
+                )
+              : null,
+          ),
+        ),
+      ),
+      terminal
+        ? null
+        : el(
+            "li",
+            { class: "step pending" },
+            el("time", {}, ""),
             el(
-              "li",
+              "div",
               {},
-              el("span", {}, when(t.at)),
-              el("span", { class: "event" }, t.event),
               el(
                 "span",
-                {},
-                t.note ?? "",
-                ...Object.entries(t.refs).map(([k, v]) =>
-                  el("code", {}, ` ${k}=${v}`),
-                ),
-                t.url
-                  ? el(
-                      "a",
-                      { href: t.url, rel: "noreferrer", target: "_blank" },
-                      " evidence",
-                    )
-                  : null,
+                { class: "step-name" },
+                ask.trace.length === 0
+                  ? `Waiting for ${ask.requester} to read the answer`
+                  : `Waiting for ${ask.requester} to finish`,
               ),
             ),
           ),
-          ask.trace.length === 0
-            ? el(
-                "li",
-                { class: "pending" },
-                "The requester has not read the answer yet.",
-              )
-            : null,
-        )
-      : null,
+    ),
   );
 }
 
@@ -869,11 +1021,13 @@ async function route() {
   if (name === "history") {
     await show("history");
     if (id) await select(id);
+    else renderEmptyDetail();
     return;
   }
   await show("inbox");
   const first = id ?? state.open[0]?.id;
   if (first) await select(first);
+  else renderEmptyDetail();
 }
 
 // ---- Keyboard --------------------------------------------------------------------------
