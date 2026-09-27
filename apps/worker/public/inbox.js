@@ -2,12 +2,15 @@
 // The Roger inbox. Plain DOM, no build step; every string from the API is
 // inserted as text, never as HTML.
 
+import { deviceApproval, formatCode } from "./device.js";
+
 /** @typedef {import("../src/protocol.gen.ts").Ask} Ask */
 /** @typedef {import("../src/protocol.gen.ts").AskOption} AskOption */
 /** @typedef {{ ask: Ask, reason: "not_delivered" | "not_finished" }} Stalled */
 /** @typedef {{ login: string, githubId: number, ntfyTopic: string | null, pushes: boolean, passkeys: { id: string, createdAt: number, lastUsedAt: number | null }[] }} Me */
-/** @typedef {{ id: string, name: string, pickupMinutes: number, completionMinutes: number, createdBy: string | null, createdAt: number, disabledAt: number | null, tokens: { id: string, createdAt: number, revokedAt: number | null }[] }} RequesterView */
+/** @typedef {{ id: string, name: string, pickupMinutes: number, completionMinutes: number, createdBy: string | null, createdAt: number, disabledAt: number | null, machine: string | null, tokens: { id: string, createdAt: number, revokedAt: number | null }[] }} RequesterView */
 /** @typedef {{ id: string, name: string, createdAt: number, requesters: { id: string, name: string, disabledAt: number | null }[] }} MachineView */
+/** @typedef {{ suggested: string | null, source: string | null, userAgent: string | null, createdAt: number, expiresAt: number }} PendingLogin */
 /** @typedef {"inbox" | "history" | "settings" | "device"} View */
 
 const state = {
@@ -822,14 +825,22 @@ async function addPasskey() {
 
 // ---- Settings --------------------------------------------------------------------
 
-async function renderSettings() {
+/**
+ * @param {MachineView[]} [shown] Machines already listed, to append the next page to.
+ * @param {string | null} [after] Cursor of the next page of machines.
+ */
+async function renderSettings(shown = [], after = null) {
   const me = state.me;
   if (!me) return;
-  /** @type {[{ requesters: RequesterView[], truncated: boolean }, { machines: MachineView[] }]} */
-  const [{ requesters, truncated }, { machines }] = await Promise.all([
+  /** @type {[{ requesters: RequesterView[], truncated: boolean }, { machines: MachineView[], next: string | null }]} */
+  const [{ requesters, truncated }, page] = await Promise.all([
     api("GET", "/v1/inbox/requesters"),
-    api("GET", "/v1/inbox/machines"),
+    api(
+      "GET",
+      `/v1/inbox/machines${after ? `?after=${encodeURIComponent(after)}` : ""}`,
+    ),
   ]);
+  const machines = [...shown, ...page.machines];
   const topic = /** @type {HTMLInputElement} */ (
     el("input", {
       value: me.ntfyTopic ?? "",
@@ -980,6 +991,16 @@ async function renderSettings() {
             { class: "none" },
             "No machine is logged in. Run roger login on one.",
           ),
+      page.next
+        ? el(
+            "button",
+            {
+              class: "quiet",
+              onclick: () => void renderSettings(machines, page.next),
+            },
+            "More machines",
+          )
+        : null,
     ),
     el(
       "section",
@@ -988,7 +1009,7 @@ async function renderSettings() {
       el(
         "p",
         {},
-        "Requesters with their own token, for automations that do not use roger login. Its Asks come to you unless they name someone with --to. Only you can issue or revoke its tokens. A logged-in machine can adopt one with roger adopt.",
+        "Requesters with their own token, for automations that do not use roger login. Its Asks come to you unless they name someone with --to. Only you can issue or revoke its tokens. Adopt one to a logged-in machine to keep it there under --as <name>; its tokens keep working.",
       ),
       truncated ? el("p", { class: "none" }, "Showing the first 100.") : null,
       el(
@@ -1005,7 +1026,26 @@ async function renderSettings() {
           el(
             "tr",
             {},
-            el("td", {}, r.name, r.disabledAt ? " (disabled)" : ""),
+            el(
+              "td",
+              {},
+              r.name,
+              r.disabledAt ? " (disabled)" : "",
+              r.machine
+                ? el(
+                    "div",
+                    { class: "none" },
+                    `Adopted by ${r.machine} `,
+                    el(
+                      "button",
+                      { class: "quiet", onclick: () => void release(r.id) },
+                      "Release",
+                    ),
+                  )
+                : !r.disabledAt && !r.name.includes("/") && machines.length
+                  ? adoptForm(r.id, machines)
+                  : null,
+            ),
             el(
               "td",
               {},
@@ -1103,6 +1143,55 @@ async function revoke(id) {
   }
 }
 
+/**
+ * @param {string} requesterId
+ * @param {MachineView[]} machines
+ */
+function adoptForm(requesterId, machines) {
+  const select = /** @type {HTMLSelectElement} */ (
+    el(
+      "select",
+      { "aria-label": "Machine to adopt it" },
+      ...machines.map((m) => el("option", { value: m.id }, m.name)),
+    )
+  );
+  return el(
+    "div",
+    {},
+    select,
+    el(
+      "button",
+      {
+        class: "quiet",
+        onclick: async () => {
+          try {
+            await api("POST", `/v1/inbox/requesters/${requesterId}/adopt`, {
+              machineId: select.value,
+            });
+            await renderSettings();
+          } catch (error) {
+            notify(
+              error instanceof Error ? error.message : String(error),
+              true,
+            );
+          }
+        },
+      },
+      "Adopt",
+    ),
+  );
+}
+
+/** @param {string} id */
+async function release(id) {
+  try {
+    await api("POST", `/v1/inbox/requesters/${id}/release`);
+    await renderSettings();
+  } catch (error) {
+    notify(error instanceof Error ? error.message : String(error), true);
+  }
+}
+
 /** @param {string} id */
 async function revokeMachine(id) {
   try {
@@ -1116,77 +1205,122 @@ async function revokeMachine(id) {
 // ---- Machine login ---------------------------------------------------------------
 
 /**
- * Approves or denies a `roger login`. The code comes from the URL fragment,
- * which the browser never sends, and goes to the API only in request bodies.
- * @param {string} prefilled
+ * Approves or denies a `roger login`. The person types the code from their
+ * own terminal: a link can carry someone else's code, so a code in the URL
+ * is never used (RFC 8628 sections 3.3.1 and 5.4). Codes go to the API only
+ * in request bodies.
+ * @param {boolean} fromLink
  */
-function renderDevice(prefilled) {
+function renderDevice(fromLink) {
+  const flow = deviceApproval(
+    (code) =>
+      /** @type {Promise<PendingLogin>} */ (
+        api("POST", "/v1/inbox/device", { userCode: code })
+      ),
+  );
   const code = /** @type {HTMLInputElement} */ (
     el("input", {
-      value: prefilled,
       placeholder: "BCDF-GHJK",
       autocomplete: "off",
       "aria-label": "Code from roger login",
     })
   );
   const result = el("div");
+  // Any edit forgets the looked-up login and its buttons.
+  code.addEventListener("input", () => {
+    flow.edit();
+    result.replaceChildren();
+  });
   const lookup = async () => {
-    try {
-      /** @type {{ userCode: string, suggested: string | null, createdAt: number, expiresAt: number }} */
-      const pending = await api("POST", "/v1/inbox/device", {
-        userCode: code.value.trim(),
-      });
-      const machine = /** @type {HTMLInputElement} */ (
-        el("input", {
-          value: pending.suggested ?? "",
-          placeholder: "studio",
-          "aria-label": "Machine name",
-        })
+    result.replaceChildren(el("p", { class: "none" }, "Looking up…"));
+    const found = await flow.lookup(code.value);
+    if (found.kind === "stale") return;
+    if (found.kind === "failed") {
+      result.replaceChildren();
+      notify(
+        found.error instanceof Error
+          ? found.error.message
+          : String(found.error),
+        true,
       );
-      /** @param {"approve" | "deny"} verb */
-      const decide = async (verb) => {
-        try {
-          await api(
-            "POST",
-            `/v1/inbox/device/${verb}`,
-            verb === "approve"
-              ? { userCode: pending.userCode, machine: machine.value.trim() }
-              : { userCode: pending.userCode },
-          );
-          result.replaceChildren(
-            el(
-              "p",
-              {},
-              verb === "approve"
-                ? `Approved. ${machine.value.trim()} is logged in once roger login finishes.`
-                : "Denied. roger login stops on that machine.",
-            ),
-          );
-        } catch (error) {
-          notify(error instanceof Error ? error.message : String(error), true);
-        }
-      };
-      result.replaceChildren(
-        el(
-          "p",
-          {},
-          `A login started ${ago(pending.createdAt)} is waiting for this code. Name the machine; its automations become requesters named after it, such as ${pending.suggested ?? "studio"}/default. A machine of yours with the same name is logged out and this one takes over its requesters.`,
-        ),
-        el(
-          "div",
-          { class: "inline-form" },
-          machine,
-          el("button", { onclick: () => void decide("approve") }, "Approve"),
-          el(
-            "button",
-            { class: "quiet", onclick: () => void decide("deny") },
-            "Deny",
-          ),
-        ),
-      );
-    } catch (error) {
-      notify(error instanceof Error ? error.message : String(error), true);
+      return;
     }
+    const { pending } = found;
+    const shown = formatCode(found.code);
+    const machine = /** @type {HTMLInputElement} */ (
+      el("input", {
+        value: pending.suggested ?? "",
+        placeholder: "studio",
+        "aria-label": "Machine name",
+      })
+    );
+    /** @param {"approve" | "deny"} verb */
+    const decide = async (verb) => {
+      // Only the login whose code is still in the input.
+      const target = flow.target(code.value);
+      if (!target) {
+        notify(
+          "The code changed. Continue with the code from your terminal.",
+          true,
+        );
+        return;
+      }
+      try {
+        await api(
+          "POST",
+          `/v1/inbox/device/${verb}`,
+          verb === "approve"
+            ? { userCode: target.code, machine: machine.value.trim() }
+            : { userCode: target.code },
+        );
+        flow.edit();
+        result.replaceChildren(
+          el(
+            "p",
+            {},
+            verb === "approve"
+              ? `Approved ${shown}. ${machine.value.trim()} is logged in once roger login finishes.`
+              : `Denied ${shown}. roger login stops on that machine.`,
+          ),
+        );
+      } catch (error) {
+        notify(error instanceof Error ? error.message : String(error), true);
+      }
+    };
+    result.replaceChildren(
+      el(
+        "dl",
+        {},
+        el("dt", {}, "Code"),
+        el("dd", { class: "mono" }, shown),
+        el("dt", {}, "Started"),
+        el("dd", {}, ago(pending.createdAt)),
+        el("dt", {}, "From"),
+        el("dd", {}, pending.source ?? "unknown"),
+        el("dt", {}, "Client"),
+        el("dd", {}, pending.userAgent ?? "unknown"),
+      ),
+      el(
+        "p",
+        {},
+        `Approve only if ${shown} is the code in your terminal and you started this login. Its automations become requesters named after the machine, such as ${pending.suggested ?? "studio"}/default. A machine of yours with the same name is logged out once this one is used, and this one takes over its requesters.`,
+      ),
+      el(
+        "div",
+        { class: "inline-form" },
+        machine,
+        el(
+          "button",
+          { onclick: () => void decide("approve") },
+          `Approve ${shown}`,
+        ),
+        el(
+          "button",
+          { class: "quiet", onclick: () => void decide("deny") },
+          `Deny ${shown}`,
+        ),
+      ),
+    );
   };
   $("device-view").replaceChildren(
     el(
@@ -1196,8 +1330,15 @@ function renderDevice(prefilled) {
       el(
         "p",
         {},
-        "Approve only a code that roger login just printed in your own terminal. The machine can then ask you for decisions and read your answers as any of its requesters, until you revoke it in Settings.",
+        "Type the code that roger login printed in your own terminal. The machine can then ask you for decisions and read your answers as any of its requesters, until you revoke it in Settings.",
       ),
+      fromLink
+        ? el(
+            "p",
+            { class: "none" },
+            "This page was opened from a link. Links can carry someone else's code, so type the one from your terminal.",
+          )
+        : null,
       el(
         "div",
         { class: "inline-form" },
@@ -1207,7 +1348,6 @@ function renderDevice(prefilled) {
       result,
     ),
   );
-  if (prefilled) void lookup();
 }
 
 /** @param {string} id */
@@ -1289,9 +1429,9 @@ async function route() {
   if (name === "settings") return show("settings");
   if (name === "device") {
     await show("device");
-    // Drop the code from the address bar and history once read.
+    // A code in the link is never used; drop it from the address bar.
     if (id) history.replaceState(null, "", "#device");
-    renderDevice(id ?? "");
+    renderDevice(id !== undefined);
     return;
   }
   if (name === "history") {

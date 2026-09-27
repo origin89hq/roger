@@ -27,6 +27,8 @@ export interface RequesterView {
   createdBy: string | null;
   createdAt: number;
   disabledAt: number | null;
+  /** The machine name it was adopted to, if any. */
+  machine: string | null;
   tokens: { id: string; createdAt: number; revokedAt: number | null }[];
 }
 
@@ -242,7 +244,7 @@ export class Accounts {
       .prepare(
         `SELECT r.*, p.login AS created_by_login FROM requesters r
          LEFT JOIN responders p ON p.github_id = r.created_by
-         WHERE r.created_by = ? AND instr(r.name, '/') = 0
+         WHERE r.created_by = ? AND (instr(r.name, '/') = 0 OR r.machine IS NULL)
          ORDER BY r.disabled_at IS NOT NULL, r.name LIMIT ?`,
       )
       .bind(owner, limit + 1)
@@ -267,6 +269,7 @@ export class Accounts {
       created_by_login: string | null;
       created_at: number;
       disabled_at: number | null;
+      machine: string | null;
     };
     type TokenRow = {
       id: string;
@@ -290,6 +293,7 @@ export class Accounts {
         createdBy: r.created_by_login,
         createdAt: r.created_at,
         disabledAt: r.disabled_at,
+        machine: r.machine,
         tokens: byRequester.get(r.id) ?? [],
       })),
     };

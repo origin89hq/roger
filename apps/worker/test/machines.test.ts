@@ -1,7 +1,14 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { deviceApproval } from "../public/device.js";
 import { sha256 } from "../src/ids.ts";
-import { MACHINE_REQUESTER_LIMIT } from "../src/machines.ts";
+import {
+  DEVICE_ATTEMPT_WINDOW_MS,
+  DEVICE_ATTEMPTS,
+  MACHINE_PAGE,
+  MACHINE_REQUESTER_LIMIT,
+  Machines,
+} from "../src/machines.ts";
 import type {
   Ask,
   AskList,
@@ -32,12 +39,16 @@ function form(
   svc: TestServices,
   path: string,
   fields: Record<string, string>,
+  headers: Record<string, string> = {},
 ): Promise<Response> {
   return send(
     svc,
     new Request(`${ORIGIN}${path}`, {
       method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        ...headers,
+      },
       body: new URLSearchParams(fields).toString(),
     }),
   );
@@ -110,6 +121,61 @@ function as(
     path,
     body,
     name === null ? {} : { "roger-requester": name },
+  );
+}
+
+/** The id of `owner`'s active machine `name`, from Settings. */
+async function machineId(
+  svc: TestServices,
+  owner: { cookie: string },
+  name: string,
+): Promise<string> {
+  let after: string | null = null;
+  for (;;) {
+    const page: {
+      machines: { id: string; name: string }[];
+      next: string | null;
+    } = await (
+      await browser(
+        svc,
+        owner.cookie,
+        "GET",
+        `/v1/inbox/machines${after ? `?after=${after}` : ""}`,
+      )
+    ).json();
+    const found = page.machines.find((m) => m.name === name);
+    if (found) return found.id;
+    if (!page.next) throw new Error(`no machine ${name}`);
+    after = page.next;
+  }
+}
+
+function adopt(
+  svc: TestServices,
+  cookie: string,
+  requesterId: string,
+  machine: string,
+) {
+  return browser(
+    svc,
+    cookie,
+    "POST",
+    `/v1/inbox/requesters/${requesterId}/adopt`,
+    {
+      machineId: machine,
+    },
+  );
+}
+
+/** Gives `owner`'s machine `name` `n` requesters directly. */
+async function fillRequesters(owner: number, name: string, n: number) {
+  await env.DB.batch(
+    Array.from({ length: n }, (_, i) =>
+      env.DB.prepare(
+        `INSERT INTO requesters (id, name, pickup_minutes, completion_minutes, created_by, created_at, machine)
+         VALUES (?, ?, 1, 1, ?, 0, ?)`,
+      ).bind(`${name}-${i}`, `${name}/job-${i}`, owner, name),
+    ),
   );
 }
 
@@ -344,17 +410,21 @@ describe("device authorization", () => {
     expect(theirs.status).toBe(409);
     expect((await errorOf(theirs)).message).toContain("Someone else");
 
-    // Until the new login is collected, the old one keeps working.
+    // Until the new credential is used, the old one keeps working, so a
+    // login that is never collected or saved takes nothing offline.
     const again = await start(svc);
     expect(
       (await approve(me.cookie, again.user_code, studio.name)).status,
     ).toBe(204);
-    expect(
-      (await agent(svc, studio.credential, "GET", "/v1/asks")).status,
-    ).toBe(200);
     const token = await (
       await poll(svc, again.device_code)
     ).json<MachineToken>();
+    expect(
+      (await agent(svc, studio.credential, "GET", "/v1/asks")).status,
+    ).toBe(200);
+    expect(
+      (await agent(svc, token.access_token, "GET", "/v1/asks")).status,
+    ).toBe(200);
     expect(
       (await agent(svc, studio.credential, "GET", "/v1/asks")).status,
     ).toBe(401);
@@ -603,69 +673,107 @@ describe("machine credentials", () => {
     expect(full.status).toBe(403);
   });
 
-  it("can adopt a requester the owner made in Settings, whose token keeps working", async () => {
+  it("adopt a Settings requester only through the inbox, and release it", async () => {
     const svc = services();
     const me = await person(svc);
     const other = await person(svc);
     const legacy = await requester(svc, me);
     const theirs = await requester(svc, other);
     const studio = await login(svc, me);
+    const studioId = await machineId(svc, me, studio.name);
     const before = await createAsk(svc, legacy.token, question());
 
-    const adopt = (name: string) =>
-      agent(svc, studio.credential, "POST", "/v1/machine/adopt", { name });
-    expect((await adopt(theirs.name)).status).toBe(404);
-    expect((await adopt(legacy.name)).status).toBe(200);
-    // Adoption is once: another machine cannot take it.
-    const laptop = await login(svc, me);
+    // A machine credential alone cannot adopt anything.
+    const alone = await agent(
+      svc,
+      studio.credential,
+      "POST",
+      "/v1/machine/adopt",
+      {
+        name: legacy.name,
+      },
+    );
+    expect(alone.status).toBe(404);
     expect(
       (
-        await agent(svc, laptop.credential, "POST", "/v1/machine/adopt", {
-          name: legacy.name,
-        })
+        await as(
+          svc,
+          studio.credential,
+          legacy.name,
+          "POST",
+          "/v1/asks",
+          question(),
+        )
       ).status,
-    ).toBe(404);
+    ).toBe(201);
+    // ...that call created `<machine>/<legacy>`, so adopting now would hide its Asks.
+    const hidden = await adopt(svc, me.cookie, legacy.id, studioId);
+    expect(hidden.status).toBe(409);
+    const own = await (
+      await as(svc, studio.credential, legacy.name, "GET", "/v1/asks")
+    ).json<AskList>();
+    expect(own.asks.map((a) => a.requester)).toEqual([
+      `${studio.name}/${legacy.name}`,
+    ]);
+
+    const laptop = await login(svc, me);
+    const laptopId = await machineId(svc, me, laptop.name);
+    expect((await adopt(svc, other.cookie, legacy.id, laptopId)).status).toBe(
+      404,
+    );
+    expect((await adopt(svc, me.cookie, theirs.id, laptopId)).status).toBe(404);
+    const adopted = await adopt(svc, me.cookie, legacy.id, laptopId);
+    expect(adopted.status).toBe(200);
+    expect(await adopted.json()).toEqual({ machine: laptop.name });
+    // Adoption is once: another machine cannot take it.
+    expect((await adopt(svc, me.cookie, legacy.id, studioId)).status).toBe(404);
 
     const read = await as(
       svc,
-      studio.credential,
+      laptop.credential,
       legacy.name,
       "GET",
       `/v1/asks/${before.id}`,
     );
     expect(read.status).toBe(200);
-    const created = await as(
-      svc,
-      studio.credential,
-      legacy.name,
-      "POST",
-      "/v1/asks",
-      question(),
-    );
-    expect((await created.json<Ask>()).requester).toBe(legacy.name);
     expect((await agent(svc, legacy.token, "GET", "/v1/asks")).status).toBe(
       200,
     );
-    // Another machine naming it gets its own requester, not the adopted one.
-    const elsewhere = await as(
+
+    const released = await browser(
+      svc,
+      me.cookie,
+      "POST",
+      `/v1/inbox/requesters/${legacy.id}/release`,
+    );
+    expect(released.status).toBe(204);
+    const after = await as(
       svc,
       laptop.credential,
       legacy.name,
-      "POST",
-      "/v1/asks",
-      question(),
+      "GET",
+      `/v1/asks/${before.id}`,
     );
-    expect((await elsewhere.json<Ask>()).requester).toBe(
-      `${laptop.name}/${legacy.name}`,
-    );
-    // A static token cannot manage a machine.
+    expect(after.status).toBe(404);
     expect(
-      (
-        await agent(svc, legacy.token, "POST", "/v1/machine/adopt", {
-          name: legacy.name,
-        })
-      ).status,
-    ).toBe(401);
+      (await agent(svc, legacy.token, "GET", `/v1/asks/${before.id}`)).status,
+    ).toBe(200);
+  });
+
+  it("adopt only while the machine has room under its requester cap", async () => {
+    const svc = services();
+    const me = await person(svc);
+    const studio = await login(svc, me);
+    const id = await machineId(svc, me, studio.name);
+    await fillRequesters(me.githubId, studio.name, MACHINE_REQUESTER_LIMIT - 1);
+    const first = await requester(svc, me);
+    const second = await requester(svc, me);
+    expect((await adopt(svc, me.cookie, first.id, id)).status).toBe(200);
+    const full = await adopt(svc, me.cookie, second.id, id);
+    expect(full.status).toBe(409);
+    expect((await errorOf(full)).message).toContain(
+      `${MACHINE_REQUESTER_LIMIT} requesters`,
+    );
   });
 
   it("are listed in Settings only for their owner", async () => {
@@ -718,5 +826,294 @@ describe("static tokens", () => {
       "roger-requester": "other",
     });
     expect(named.status).toBe(400);
+  });
+});
+
+describe("login admission", () => {
+  it("limits starts per client address, leaving other addresses alone", async () => {
+    const svc = services();
+    const fields = { client_id: "roger-cli" };
+    const from = (ip: string) =>
+      form(svc, "/v1/device/code", fields, { "cf-connecting-ip": ip });
+    for (let i = 0; i < svc.limiter.limit; i++)
+      expect((await from("203.0.113.7")).status).toBe(200);
+    const limited = await from("203.0.113.7");
+    expect(limited.status).toBe(429);
+    expect((await errorOf(limited)).code).toBe("too_many_requests");
+    expect((await from("198.51.100.9")).status).toBe(200);
+  });
+
+  it("refuses every login when the deployment has no limiter", async () => {
+    const svc = services();
+    svc.deviceLimit = null;
+    const before = await count("device_codes", "1 = 1");
+    const response = await form(svc, "/v1/device/code", {
+      client_id: "roger-cli",
+    });
+    expect(response.status).toBe(429);
+    expect(await count("device_codes", "1 = 1")).toBe(before);
+  });
+
+  it("counts only pending logins toward the global cap, and recovers when they expire", async () => {
+    // A time no other test uses, so only this test's logins are unexpired.
+    const svc = services(Date.parse("2031-03-03T15:00:00Z"));
+    svc.machines = new Machines(env.DB, 3);
+    const me = await person(svc);
+    const started = [await start(svc), await start(svc), await start(svc)];
+    const refused = await form(svc, "/v1/device/code", {
+      client_id: "roger-cli",
+    });
+    expect(refused.status).toBe(503);
+    // A denied login no longer waits, so it frees its place.
+    await browser(svc, me.cookie, "POST", "/v1/inbox/device/deny", {
+      userCode: started[0]?.user_code,
+    });
+    await start(svc);
+    expect(
+      (await form(svc, "/v1/device/code", { client_id: "roger-cli" })).status,
+    ).toBe(503);
+    // Once they expire, starts are admitted again and delete the expired rows.
+    svc.clock.now += minutes(15);
+    await start(svc);
+    expect(await count("device_codes", "expires_at <= ?", svc.now())).toBe(0);
+  });
+
+  it("limits code attempts per person", async () => {
+    const svc = services();
+    const me = await person(svc);
+    const other = await person(svc);
+    const started = await start(svc);
+    for (let i = 0; i < DEVICE_ATTEMPTS; i++) {
+      const guess = await browser(svc, me.cookie, "POST", "/v1/inbox/device", {
+        userCode: "BBBB-BBBB",
+      });
+      expect(guess.status).toBe(404);
+    }
+    const blocked = await browser(
+      svc,
+      me.cookie,
+      "POST",
+      "/v1/inbox/device/approve",
+      {
+        userCode: started.user_code,
+        machine: machineName(),
+      },
+    );
+    expect(blocked.status).toBe(429);
+    const lookup = await browser(
+      svc,
+      other.cookie,
+      "POST",
+      "/v1/inbox/device",
+      {
+        userCode: started.user_code,
+      },
+    );
+    expect(lookup.status).toBe(200);
+    svc.clock.now += DEVICE_ATTEMPT_WINDOW_MS;
+    const fresh = await start(svc);
+    const later = await browser(svc, me.cookie, "POST", "/v1/inbox/device", {
+      userCode: fresh.user_code,
+    });
+    expect(later.status).toBe(200);
+  });
+
+  it("shows where a login came from", async () => {
+    const svc = services();
+    const me = await person(svc);
+    const response = await form(
+      svc,
+      "/v1/device/code",
+      { client_id: "roger-cli" },
+      {
+        "cf-connecting-ip": "203.0.113.7",
+        "user-agent": `roger/0.1.3 ${"x".repeat(300)}`,
+      },
+    );
+    const started = await response.json<DeviceAuthorization>();
+    const lookup = await (
+      await browser(svc, me.cookie, "POST", "/v1/inbox/device", {
+        userCode: started.user_code,
+      })
+    ).json<{ source: string; userAgent: string }>();
+    expect(lookup.source).toBe("203.0.113.7");
+    expect(lookup.userAgent).toHaveLength(200);
+    expect(lookup.userAgent.startsWith("roger/0.1.3 ")).toBe(true);
+  });
+});
+
+describe("machine names", () => {
+  it("are free again once revoked; the previous owner's requesters move aside and stay theirs", async () => {
+    const svc = services();
+    const first = await person(svc);
+    const second = await person(svc);
+    const studio = await login(svc, first);
+    const created = await as(
+      svc,
+      studio.credential,
+      "job",
+      "POST",
+      "/v1/asks",
+      question(),
+    );
+    const ask = await created.json<Ask>();
+    await browser(
+      svc,
+      first.cookie,
+      "POST",
+      `/v1/inbox/machines/${await machineId(svc, first, studio.name)}/revoke`,
+    );
+
+    const taken = await login(svc, second, studio.name);
+    const mine = await as(
+      svc,
+      taken.credential,
+      "job",
+      "POST",
+      "/v1/asks",
+      question(),
+    );
+    expect((await mine.json<Ask>()).requester).toBe(`${studio.name}/job`);
+
+    // The first owner's requester is renamed, listed in their Settings, and
+    // reachable with a token they issue.
+    const listed = await (
+      await browser(svc, first.cookie, "GET", "/v1/inbox/requesters")
+    ).json<{
+      requesters: { id: string; name: string; machine: string | null }[];
+    }>();
+    const moved = listed.requesters.find((r) =>
+      r.name.startsWith(`${studio.name}/job#`),
+    );
+    expect(moved?.machine).toBeNull();
+    const issued = await browser(
+      svc,
+      first.cookie,
+      "POST",
+      `/v1/inbox/requesters/${moved?.id}/tokens`,
+    );
+    const { token } = await issued.json<{ token: string }>();
+    const read = await agent(svc, token, "GET", `/v1/asks/${ask.id}`);
+    expect(read.status).toBe(200);
+    expect((await read.json<Ask>()).requester).toBe(moved?.name);
+    // The second owner cannot reach it.
+    expect(
+      (await as(svc, taken.credential, "job", "GET", `/v1/asks/${ask.id}`))
+        .status,
+    ).toBe(404);
+  });
+
+  it("stay discoverable and revocable past one page of Settings", async () => {
+    const svc = services();
+    const me = await person(svc);
+    const prefix = machineName();
+    await env.DB.batch(
+      Array.from({ length: MACHINE_PAGE + 1 }, (_, i) =>
+        env.DB.prepare(
+          "INSERT INTO machines (id, name, owner, hash, replacing, created_at) VALUES (?, ?, ?, ?, 0, 0)",
+        ).bind(
+          `01K6A${String(i).padStart(21, "0")}`,
+          `${prefix}-${i}`,
+          me.githubId,
+          crypto.randomUUID(),
+        ),
+      ),
+    );
+    const seen: string[] = [];
+    let after: string | null = null;
+    for (;;) {
+      const page: { machines: { id: string }[]; next: string | null } = await (
+        await browser(
+          svc,
+          me.cookie,
+          "GET",
+          `/v1/inbox/machines${after ? `?after=${after}` : ""}`,
+        )
+      ).json();
+      expect(page.machines.length).toBeLessThanOrEqual(MACHINE_PAGE);
+      seen.push(...page.machines.map((m) => m.id));
+      if (!page.next) break;
+      after = page.next;
+    }
+    expect(seen).toHaveLength(MACHINE_PAGE + 1);
+    const last = seen.at(-1);
+    expect(
+      (
+        await browser(
+          svc,
+          me.cookie,
+          "POST",
+          `/v1/inbox/machines/${last}/revoke`,
+        )
+      ).status,
+    ).toBe(204);
+    expect(
+      await count("machines", "id = ? AND revoked_at IS NOT NULL", last),
+    ).toBe(1);
+  });
+});
+
+describe("the approval page", () => {
+  /** A lookup whose answers the test releases in any order. */
+  function controlled() {
+    const calls: {
+      code: string;
+      resolve: (v: string) => void;
+      reject: (e: Error) => void;
+    }[] = [];
+    const flow = deviceApproval(
+      (code) =>
+        new Promise<string>((resolve, reject) => {
+          calls.push({ code, resolve, reject });
+        }),
+    );
+    return { flow, calls };
+  }
+
+  it("approves only the looked-up code while it is still typed", async () => {
+    const { flow, calls } = controlled();
+    const found = flow.lookup("bcdf-ghjk");
+    calls[0]?.resolve("login A");
+    expect(await found).toEqual({
+      kind: "ready",
+      code: "BCDFGHJK",
+      pending: "login A",
+    });
+    expect(flow.target("BCDF-GHJK")?.code).toBe("BCDFGHJK");
+    // Typing another code does not approve the old one.
+    expect(flow.target("MNPQ-RSTV")).toBeNull();
+  });
+
+  it("forgets the looked-up login on any edit", async () => {
+    const { flow, calls } = controlled();
+    const found = flow.lookup("BCDF-GHJK");
+    calls[0]?.resolve("login A");
+    await found;
+    flow.edit();
+    expect(flow.target("BCDF-GHJK")).toBeNull();
+  });
+
+  it("forgets the old login when a second lookup fails", async () => {
+    const { flow, calls } = controlled();
+    const first = flow.lookup("BCDF-GHJK");
+    calls[0]?.resolve("login A");
+    await first;
+    const second = flow.lookup("MNPQ-RSTV");
+    calls[1]?.reject(new Error("No login is waiting for that code."));
+    expect((await second).kind).toBe("failed");
+    expect(flow.target("BCDF-GHJK")).toBeNull();
+    expect(flow.target("MNPQ-RSTV")).toBeNull();
+  });
+
+  it("ignores an older lookup that answers last", async () => {
+    const { flow, calls } = controlled();
+    const older = flow.lookup("BCDF-GHJK");
+    const newer = flow.lookup("MNPQ-RSTV");
+    calls[1]?.resolve("login B");
+    calls[0]?.resolve("login A");
+    expect((await newer).kind).toBe("ready");
+    expect(await older).toEqual({ kind: "stale" });
+    expect(flow.target("BCDF-GHJK")).toBeNull();
+    expect(flow.target("MNPQ-RSTV")?.pending).toBe("login B");
   });
 });

@@ -61,8 +61,8 @@ pub enum Auth {
 }
 
 /// Picks the credential: `ROGER_TOKEN`, then the file `ROGER_TOKEN_FILE`
-/// names, then the saved login, then `default_file` when it exists. An
-/// explicitly configured token wins so existing jobs keep their requester.
+/// names, then `default_file` when it exists, then the saved login. Any
+/// token wins, so jobs set up before `roger login` keep their requester.
 ///
 /// `saved` is read only when no token is configured, so a damaged login file
 /// does not break a job that names its own token.
@@ -72,8 +72,10 @@ pub fn resolve_auth(
     saved: impl FnOnce() -> Result<Option<Credentials>>,
     default_file: Option<&Path>,
 ) -> Result<Auth> {
-    let explicit = token.is_some_and(|t| !t.trim().is_empty()) || token_file.is_some();
-    if !explicit && let Some(credentials) = saved()? {
+    let configured = token.is_some_and(|t| !t.trim().is_empty())
+        || token_file.is_some()
+        || default_file.is_some_and(Path::is_file);
+    if !configured && let Some(credentials) = saved()? {
         return Ok(Auth::Machine(credentials));
     }
     resolve_token(token, token_file, default_file).map(Auth::Token)
@@ -167,14 +169,6 @@ impl Client {
         }
         let text = response.body_mut().read_to_string()?;
         Err(api_error(status.as_u16(), &text))
-    }
-
-    /// Binds a requester made in Settings to this machine.
-    pub fn adopt(&self, name: &RequesterName) -> Result<serde_json::Value> {
-        self.post(
-            "/v1/machine/adopt",
-            &serde_json::json!({ "name": name.as_str() }),
-        )
     }
 
     fn get_request(&self, path: &str) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
@@ -531,11 +525,12 @@ mod tests {
     }
 
     #[test]
-    fn an_explicit_token_wins_over_the_login_which_wins_over_the_default_file() -> TestResult {
+    fn any_token_wins_over_the_login() -> TestResult {
         let dir = std::env::temp_dir().join(format!("roger-cli-auth-{}", std::process::id()));
         std::fs::create_dir_all(&dir)?;
         let default = dir.join("token");
         std::fs::write(&default, "default-token\n")?;
+        let absent = dir.join("absent");
         let login = || Ok(Some(saved()));
         let unread = || -> Result<Option<Credentials>> { Err(Error::NotLoggedIn) };
 
@@ -547,21 +542,22 @@ mod tests {
             resolve_auth(None, Some(&default), unread, None)?,
             Auth::Token("default-token".to_owned())
         );
+        // A job set up with ~/.config/roger/token keeps its requester after a login.
         assert_eq!(
-            resolve_auth(Some(" "), None, login, Some(&default))?,
-            Auth::Machine(saved())
-        );
-        assert_eq!(
-            resolve_auth(None, None, || Ok(None), Some(&default))?,
+            resolve_auth(None, None, unread, Some(&default))?,
             Auth::Token("default-token".to_owned())
         );
-        // A damaged login file is an error, not a silent fallback to another requester.
+        assert_eq!(
+            resolve_auth(Some(" "), None, login, Some(&absent))?,
+            Auth::Machine(saved())
+        );
+        // A damaged login file is an error, not a silent fallback.
         assert!(matches!(
-            resolve_auth(None, None, unread, Some(&default)),
+            resolve_auth(None, None, unread, Some(&absent)),
             Err(Error::NotLoggedIn)
         ));
         assert!(matches!(
-            resolve_auth(None, None, || Ok(None), None),
+            resolve_auth(None, None, || Ok(None), Some(&absent)),
             Err(Error::MissingToken)
         ));
         std::fs::remove_dir_all(&dir)?;

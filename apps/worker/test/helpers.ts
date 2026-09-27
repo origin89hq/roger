@@ -68,7 +68,19 @@ export class FakeNotifier implements Notifier {
   }
 }
 
+/** Counts device logins per IP, like the Workers Rate Limiting binding. */
+export class FakeLimiter {
+  counts = new Map<string, number>();
+  limit = 10;
+  async admit(ip: string): Promise<boolean> {
+    const n = (this.counts.get(ip) ?? 0) + 1;
+    this.counts.set(ip, n);
+    return n <= this.limit;
+  }
+}
+
 export interface TestServices extends Services {
+  limiter: FakeLimiter;
   clock: { now: number };
   notifier: FakeNotifier;
   github: FakeGitHub;
@@ -80,7 +92,10 @@ export function services(now = MONDAY_10AM): TestServices {
   const accounts = new Accounts(env.DB);
   const clock = { now };
   const deferred: Promise<unknown>[] = [];
+  const limiter = new FakeLimiter();
   return {
+    limiter,
+    deviceLimit: (ip) => limiter.admit(ip),
     store: new Store(env.DB),
     accounts,
     machines: new Machines(env.DB),

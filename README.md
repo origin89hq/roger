@@ -36,8 +36,9 @@ roger login                      # prints a code; approve it in the inbox
 roger ask --as merge-gate ...    # or export ROGER_REQUESTER=merge-gate
 ```
 
-`roger login` uses device authorization (RFC 8628): the person approves the
-code in the inbox and names the machine, such as `studio`. The CLI saves the
+`roger login` uses device authorization (RFC 8628): the person types the code
+into the inbox, checks where the login came from, and names the machine, such
+as `studio`. A machine name belongs to one person while it is logged in. The CLI saves the
 machine credential to `~/.config/roger/credentials` with mode 0600; the Worker
 stores only its hash. Each automation names itself with `--as <name>` or
 `ROGER_REQUESTER`, and Roger resolves it to the requester `<machine>/<name>`,
@@ -51,11 +52,16 @@ Any process that can read a machine's credential can act as any of that
 machine's requesters, as every job on a machine could read a shared token file
 before. Requester names separate bookkeeping, not privilege.
 
-Requesters and tokens created under Settings keep working. `ROGER_TOKEN` and
-`ROGER_TOKEN_FILE` take precedence over the login, and `~/.config/roger/token`
-is read when there is no login. `roger adopt <name>` binds such a requester to
-the logged-in machine, so `--as <name>` there keeps its Asks. `ROGER_URL`
-defaults to `https://roger.origin89.com`.
+Requesters and tokens created under Settings keep working, and any token takes
+precedence over the login: `ROGER_TOKEN`, then `ROGER_TOKEN_FILE`, then
+`~/.config/roger/token`. To move such a requester to the login, adopt it to
+the machine in Settings, so `--as <name>` there keeps its Asks, and remove the
+token from the job. `ROGER_URL` defaults to `https://roger.origin89.com`.
+
+The Worker admits 10 login starts per minute per client IP, through the
+`DEVICE_LOGINS` rate-limit binding in `wrangler.jsonc`; without the binding it
+refuses every login. Machines behind one NAT share that limit, so log them in
+one at a time.
 
 ## Agent skills
 

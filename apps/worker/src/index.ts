@@ -28,6 +28,9 @@ function services(env: Env, ctx: ExecutionContext): Services | null {
     store: new Store(env.DB),
     accounts,
     machines: new Machines(env.DB),
+    deviceLimit: env.DEVICE_LOGINS
+      ? async (ip) => (await env.DEVICE_LOGINS.limit({ key: ip })).success
+      : null,
     passkeys: new Passkeys(accounts, config),
     github: githubApi(config.github.clientId, config.github.clientSecret),
     notifier: config.ntfy ? ntfy(config.ntfy.url, config.ntfy.token) : null,

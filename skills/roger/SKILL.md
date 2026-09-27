@@ -38,10 +38,10 @@ fall back to guessing the answer.
 - Any process that can read the machine's login can act as any of its
   requesters. Names keep jobs' answers apart; they do not limit what a job can
   do.
-- A requester token from Settings still works: `ROGER_TOKEN` and
-  `ROGER_TOKEN_FILE` take precedence over the login, and
-  `~/.config/roger/token` is used when there is no login. A token is one
-  requester, so `--as` needs the login.
+- A requester token from Settings still works, and any token takes
+  precedence over the login: `ROGER_TOKEN`, then `ROGER_TOKEN_FILE`, then
+  `~/.config/roger/token`. A token is one requester, so `--as` needs the
+  login.
 - `ROGER_URL` defaults to `https://roger.origin89.com`.
 
 ## Ask

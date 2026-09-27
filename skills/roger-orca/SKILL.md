@@ -16,8 +16,8 @@ Name each Orca job on every `roger` call, with `--as` or by exporting
 coordinator and `merge-gate` for the gate. Each name is its own requester, such
 as `studio/merge-gate`, so one job never reads, traces, or finishes another
 job's answers. Keep the name stable across runs of the same job. To keep an
-existing requester such as `orca@studio` with its open Asks, run
-`roger adopt orca@studio` once on that machine and use `--as orca@studio`.
+existing requester such as `orca@studio` with its open Asks, a person adopts
+it to the machine in Settings; then use `--as orca@studio`.
 
 ## Coordinator escalations
 

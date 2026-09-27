@@ -240,7 +240,12 @@ export const deviceApproval = z.strictObject({
   userCode,
   machine: machineName,
 });
-export const adoption = z.strictObject({ name: requesterName });
+export const machineRef = z.strictObject({
+  machineId: z.string().regex(ULID_PATTERN, "must be a machine id"),
+});
+export const machineCursor = z.strictObject({
+  after: z.string().regex(ULID_PATTERN, "must be a machine id").optional(),
+});
 
 export const newRequester = z.strictObject({
   name: requesterName,

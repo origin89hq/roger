@@ -224,6 +224,8 @@ wire_enum! {
         Conflict = "conflict",
         /// The request body exceeds the size limit.
         TooLarge = "too_large",
+        /// Too many attempts; wait and try again.
+        TooManyRequests = "too_many_requests",
         /// The Worker failed.
         Internal = "internal",
     }

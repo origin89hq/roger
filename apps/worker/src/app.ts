@@ -34,7 +34,6 @@ import type {
 } from "./protocol.gen.ts";
 import {
   type AnswerRequest,
-  adoption,
   answer,
   answerChallenge,
   appendTrace,
@@ -45,7 +44,9 @@ import {
   deviceLookup,
   LIMITS,
   listFilter,
+  machineCursor,
   machineName,
+  machineRef,
   newRequester,
   notificationSettings,
   requesterName,
@@ -56,6 +57,11 @@ export interface Services {
   store: Store;
   accounts: Accounts;
   machines: Machines;
+  /**
+   * Admits one device login from `ip`, such as a Workers Rate Limiting
+   * binding. `null` when not configured, which refuses every login.
+   */
+  deviceLimit: ((ip: string) => Promise<boolean>) | null;
   passkeys: Passkeys;
   github: GitHub;
   /** `null` when pushes are disabled. */
@@ -182,7 +188,7 @@ export function createApp(svc: Services): Hono<Env> {
     )?.[1];
     const named = c.req.header(REQUESTER_HEADER);
     if (credential?.startsWith("rogm_")) {
-      const machine = await svc.machines.byCredential(credential);
+      const machine = await svc.machines.byCredential(credential, svc.now());
       if (!machine)
         return failure(
           401,
@@ -241,7 +247,7 @@ export function createApp(svc: Services): Hono<Env> {
       c.req.header("authorization") ?? "",
     )?.[1];
     const machine = credential?.startsWith("rogm_")
-      ? await svc.machines.byCredential(credential)
+      ? await svc.machines.byCredential(credential, svc.now())
       : null;
     if (!machine)
       return failure(
@@ -258,19 +264,6 @@ export function createApp(svc: Services): Hono<Env> {
     const machine = c.get("machine");
     await svc.machines.revoke(machine.id, machine.owner, svc.now());
     return c.body(null, 204);
-  });
-
-  // Binds a requester the owner made in Settings to this machine.
-  agent.post("/machine/adopt", async (c) => {
-    const body = await parse(c.req.raw, LIMITS.adminBytes, adoption);
-    if (!body.ok) return body.response;
-    return (await svc.machines.adopt(c.get("machine"), body.value.name))
-      ? json({ requester: body.value.name })
-      : failure(
-          404,
-          "not_found",
-          "No enabled requester of yours with that name is free to adopt.",
-        );
   });
 
   // ---- Device authorization (RFC 8628): no credentials ---------------------
@@ -298,12 +291,32 @@ export function createApp(svc: Services): Hono<Env> {
         "invalid_request",
         "machine must be a short lowercase name of letters, digits, and dashes.",
       );
-    const started = await svc.machines.start(suggested, svc.now());
+    // Per source, before anything is stored. A deployment without the
+    // limiter refuses logins rather than running unlimited.
+    const ip = c.req.header("cf-connecting-ip") ?? "unknown";
+    const allowed = svc.deviceLimit ? await svc.deviceLimit(ip) : false;
+    if (!allowed)
+      return failure(
+        429,
+        "too_many_requests",
+        svc.deviceLimit
+          ? "Too many logins from this address. Wait a minute and try again."
+          : "Logins are not configured on this deployment.",
+      );
+    const country = (c.req.raw as { cf?: { country?: unknown } }).cf?.country;
+    const started = await svc.machines.start(
+      suggested,
+      {
+        source: typeof country === "string" ? `${ip} (${country})` : ip,
+        userAgent: c.req.header("user-agent")?.slice(0, 200) ?? null,
+      },
+      svc.now(),
+    );
     if (!started)
       return failure(
         503,
         "internal",
-        "Too many logins are in progress. Try again later.",
+        "Too many logins are waiting for approval. Try again later.",
       );
     const verify = `${svc.config.origin}/#device`;
     return json({
@@ -809,7 +822,20 @@ export function createApp(svc: Services): Hono<Env> {
   );
 
   // Device logins and machines. User codes travel in bodies, never in URLs,
-  // so request logs never hold one.
+  // so request logs never hold one. Each lookup, approval, and denial counts
+  // toward a per-person limit, so codes cannot be guessed.
+  // Matches `/device` itself as well.
+  inbox.use("/device/*", deviceAttempt);
+  async function deviceAttempt(c: Context<Env>, next: () => Promise<void>) {
+    if (!(await svc.machines.attempt(c.get("responder").githubId, svc.now())))
+      return failure(
+        429,
+        "too_many_requests",
+        "Too many login codes tried. Wait 15 minutes and try again.",
+      );
+    await next();
+  }
+
   inbox.post("/device", async (c) => {
     const body = await parse(c.req.raw, LIMITS.adminBytes, deviceLookup);
     if (!body.ok) return body.response;
@@ -866,8 +892,49 @@ export function createApp(svc: Services): Hono<Env> {
         );
   });
 
-  inbox.get("/machines", async (c) =>
-    json({ machines: await svc.machines.list(c.get("responder").githubId) }),
+  inbox.get("/machines", async (c) => {
+    const query = machineCursor.safeParse(c.req.query());
+    if (!query.success)
+      return failure(400, "invalid_request", describeIssues(query.error));
+    return json(
+      await svc.machines.list(
+        c.get("responder").githubId,
+        query.data.after ?? null,
+      ),
+    );
+  });
+
+  inbox.post("/requesters/:id/adopt", async (c) => {
+    const body = await parse(c.req.raw, LIMITS.adminBytes, machineRef);
+    if (!body.ok) return body.response;
+    const result = await svc.machines.adopt(
+      c.req.param("id"),
+      body.value.machineId,
+      c.get("responder").githubId,
+    );
+    switch (result.kind) {
+      case "adopted":
+        return json({ machine: result.machine });
+      case "not_found":
+        return failure(
+          404,
+          "not_found",
+          "No enabled, unbound requester and active machine of yours match.",
+        );
+      case "conflict":
+      case "full":
+        return failure(409, "conflict", result.message);
+      default: {
+        const unreachable: never = result;
+        throw new Error(`unknown adoption ${String(unreachable)}`);
+      }
+    }
+  });
+
+  inbox.post("/requesters/:id/release", async (c) =>
+    (await svc.machines.release(c.req.param("id"), c.get("responder").githubId))
+      ? c.body(null, 204)
+      : failure(404, "not_found", "No adopted requester of yours has that id."),
   );
 
   inbox.post("/machines/:id/revoke", async (c) =>

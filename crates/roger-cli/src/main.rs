@@ -51,7 +51,7 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Skill { name } => return commands::print_skill(name.as_deref()),
         Command::Login { machine } => {
             let path = config_file("credentials").ok_or(Error::NoConfigDir)?;
-            return commands::login(&base, &path, machine);
+            return commands::login(&base, &path, config_file("token").as_deref(), machine);
         }
         Command::Logout => {
             let path = config_file("credentials").ok_or(Error::NoConfigDir)?;

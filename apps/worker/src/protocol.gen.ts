@@ -247,6 +247,8 @@ export type ErrorCode =
 "conflict" | 
 /**  The request body exceeds the size limit. */
 "too_large" | 
+/**  Too many attempts; wait and try again. */
+"too_many_requests" | 
 /**  The Worker failed. */
 "internal";
 

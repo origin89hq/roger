@@ -26,8 +26,8 @@ Configuration comes from the environment:
                      unset; also used instead of the login
   ROGER_URL          API base URL (default https://roger.origin89.com)
 
-Credentials are read in this order: ROGER_TOKEN, ROGER_TOKEN_FILE, the login
-in ~/.config/roger/credentials, then a token in ~/.config/roger/token. --as
+Credentials are read in this order: ROGER_TOKEN, ROGER_TOKEN_FILE, a token in
+~/.config/roger/token, then the login in ~/.config/roger/credentials. --as
 works only with a login.
 
 `get` and `wait` print the Ask as JSON and exit with:
@@ -95,12 +95,6 @@ pub enum ApiCommand {
     Withdraw { id: AskId },
     /// Record what happened after an answer.
     Trace(TraceArgs),
-    /// Make a requester you created in Settings answer to `--as <name>` on
-    /// this machine, keeping its Asks. Its tokens keep working.
-    Adopt {
-        /// The requester's name, such as `orca@studio`.
-        name: RequesterName,
-    },
 }
 
 #[derive(Debug, Args)]

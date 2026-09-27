@@ -70,11 +70,6 @@ pub fn run(client: &Client, command: ApiCommand) -> Result<u8> {
             print_json(&client.withdraw(&id)?)?;
             Ok(0)
         }
-        ApiCommand::Adopt { name } => {
-            print_json(&client.adopt(&name)?)?;
-            eprintln!("roger: `--as {name}` now acts as the requester {name} on this machine");
-            Ok(0)
-        }
         ApiCommand::Trace(args) => {
             let TraceArgs {
                 id,
@@ -104,7 +99,12 @@ pub fn run(client: &Client, command: ApiCommand) -> Result<u8> {
 /// `roger login`: runs device authorization, saves the new credential, and
 /// only then revokes the login it replaces, so a denied or expired login
 /// leaves the old one working.
-pub fn login(base: &str, path: &Path, machine: Option<MachineName>) -> Result<u8> {
+pub fn login(
+    base: &str,
+    path: &Path,
+    token_file: Option<&Path>,
+    machine: Option<MachineName>,
+) -> Result<u8> {
     let old = credentials::load(path)?;
     // The device endpoints take no credential.
     let client = Client::new(base, "", None);
@@ -140,6 +140,13 @@ pub fn login(base: &str, path: &Path, machine: Option<MachineName>) -> Result<u8
         machine = token.machine,
         owner = token.owner,
     );
+    if let Some(file) = token_file.filter(|file| file.is_file()) {
+        eprintln!(
+            "roger: {} still takes precedence over this login. Adopt its requester to this \
+             machine in Settings and move the file away to use the login.",
+            file.display()
+        );
+    }
     Ok(0)
 }
 
