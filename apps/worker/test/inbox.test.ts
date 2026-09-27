@@ -30,6 +30,7 @@ import {
 interface Inbox {
   open: Ask[];
   stalled: { ask: Ask; reason: "not_delivered" | "not_finished" }[];
+  openTotal: number;
   now: number;
 }
 
@@ -73,6 +74,7 @@ describe("the inbox", () => {
     ]);
     expect(view.now).toBe(svc.clock.now);
     expect(view.stalled).toEqual([]);
+    expect(view.openTotal).toBe(6);
   });
 
   it("hides someone else's Ask and refuses to answer it", async () => {
@@ -735,6 +737,21 @@ async function foreignPasskey(svc: ReturnType<typeof services>) {
 }
 
 describe("requester management", () => {
+  it("lists only the signed-in person's requesters", async () => {
+    const svc = services();
+    const me = await person(svc);
+    const other = await person(svc);
+    const mine = await requester(svc, me);
+    const theirs = await requester(svc, other);
+    const list = await (
+      await browser(svc, me.cookie, "GET", "/v1/inbox/requesters")
+    ).json<{ requesters: { id: string }[]; truncated: boolean }>();
+    const ids = list.requesters.map((r) => r.id);
+    expect(ids).toContain(mine.id);
+    expect(ids).not.toContain(theirs.id);
+    expect(list.truncated).toBe(false);
+  });
+
   it("lets only the owner issue tokens, revoke them, or disable the requester", async () => {
     const svc = services();
     const owner = await person(svc);

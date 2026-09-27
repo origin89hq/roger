@@ -12,6 +12,7 @@
 const state = {
   /** @type {Me | null} */ me: null,
   /** @type {Ask[]} */ open: [],
+  /** @type {number} */ openTotal: 0,
   /** @type {Stalled[]} */ stalled: [],
   /** @type {Ask[]} */ history: [],
   /** @type {string | null} */ historyNext: null,
@@ -170,7 +171,13 @@ function row(ask, extra = []) {
 function renderInboxList() {
   const list = $("list");
   list.replaceChildren(
-    el("h2", {}, `Open (${state.open.length})`),
+    el(
+      "h2",
+      {},
+      state.openTotal > state.open.length
+        ? `Open (${state.open.length} of ${state.openTotal}, most urgent first)`
+        : `Open (${state.open.length})`,
+    ),
     ...(state.open.length
       ? state.open.map((a) => row(a))
       : [el("p", { class: "none" }, "Nothing is waiting for you.")]),
@@ -586,8 +593,8 @@ async function addPasskey() {
 async function renderSettings() {
   const me = state.me;
   if (!me) return;
-  /** @type {{ requesters: RequesterView[] }} */
-  const { requesters } = await api("GET", "/v1/inbox/requesters");
+  /** @type {{ requesters: RequesterView[], truncated: boolean }} */
+  const { requesters, truncated } = await api("GET", "/v1/inbox/requesters");
   const topic = /** @type {HTMLInputElement} */ (
     el("input", {
       value: me.ntfyTopic ?? "",
@@ -669,12 +676,13 @@ async function renderSettings() {
     el(
       "section",
       {},
-      el("h2", {}, "Requesters"),
+      el("h2", {}, "Your requesters"),
       el(
         "p",
         {},
-        "Each automation gets its own requester and token. Asks go to the person who created the requester unless they name someone with --to.",
+        "Each automation gets its own requester and token. Its Asks come to you unless they name someone with --to. Only you can issue or revoke its tokens.",
       ),
+      truncated ? el("p", { class: "none" }, "Showing the first 100.") : null,
       el(
         "table",
         {},
@@ -682,7 +690,6 @@ async function renderSettings() {
           "tr",
           {},
           el("th", {}, "Name"),
-          el("th", {}, "Owner"),
           el("th", {}, "Tokens"),
           el("th", {}),
         ),
@@ -691,7 +698,6 @@ async function renderSettings() {
             "tr",
             {},
             el("td", {}, r.name, r.disabledAt ? " (disabled)" : ""),
-            el("td", {}, r.createdBy ?? "—"),
             el(
               "td",
               {},
@@ -817,6 +823,7 @@ async function loadMe() {
 async function loadInbox() {
   const data = await api("GET", "/v1/inbox");
   state.open = data.open;
+  state.openTotal = data.openTotal;
   state.stalled = data.stalled;
   state.serverNow = data.now;
   renderInboxList();

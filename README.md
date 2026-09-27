@@ -60,9 +60,17 @@ just protocol   # regenerate the TypeScript after changing roger-protocol
 
 ## Deployment
 
-The Worker needs a D1 database named `roger` (put its `database_id` in
-`apps/worker/wrangler.jsonc`), a GitHub OAuth app with the callback
-`<APP_ORIGIN>/auth/callback`, and these settings:
+The Worker needs:
+
+- A D1 database named `roger`; put its `database_id` in `apps/worker/wrangler.jsonc`.
+- A route for `APP_ORIGIN`. `workers_dev` is off, so add a custom domain in
+  `wrangler.jsonc`, for example `"routes": [{ "pattern": "roger.origin89.com", "custom_domain": true }]`.
+- A GitHub OAuth App (not a GitHub App) with the callback URL
+  `<APP_ORIGIN>/auth/callback`. Sign-in asks for `read:org`, uses the token
+  once to check team membership, and discards it. If the organization
+  restricts third-party OAuth apps, an owner must approve this one, or every
+  sign-in is refused as not a member.
+- These settings:
 
 | Name | Kind | Meaning |
 | --- | --- | --- |
@@ -74,8 +82,9 @@ The Worker needs a D1 database named `roger` (put its `database_id` in
 | `NTFY_TOKEN` | secret | Optional ntfy access token |
 | `TIME_ZONE`, `WORK_HOURS`, `WORK_DAYS` | var | Working hours for quiet hours, `soon` pushes, expiry, and the digest |
 
-Apply migrations with `wrangler d1 migrations apply roger --remote` before
-deploying. A passkey can only be removed from D1 directly:
+Apply migrations with
+`pnpm --filter roger-worker exec wrangler d1 migrations apply roger --remote`
+before deploying. A passkey can only be removed from D1 directly:
 `DELETE FROM passkeys WHERE id = '<credential id>'`.
 
 ## License

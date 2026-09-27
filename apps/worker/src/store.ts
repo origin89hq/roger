@@ -150,6 +150,12 @@ const TERMINAL = `('applied', 'failed', 'not_applicable')`;
 const URGENCY_ORDER = `CASE a.urgency WHEN 'now' THEN 0 WHEN 'soon' THEN 1 WHEN 'later' THEN 2 ELSE 3 END`;
 const SOON_PUSH_MINUTES = 30;
 const RETENTION_MS = 90 * 24 * 60 * 60_000;
+/**
+ * How long a claim on a push or digest lasts without confirmation. A sender
+ * that dies between claiming and confirming loses the claim after this, and
+ * the next cron run sends again. Longer than the ntfy request timeout.
+ */
+export const SEND_LEASE_MS = 2 * 60_000;
 
 /** Parses JSON this Worker wrote after validating it. */
 function stored<T>(text: string): T {
@@ -291,18 +297,28 @@ export class Store {
    * index makes repeated and concurrent reads record it once.
    */
   async markDelivered(asks: readonly Ask[], now: number): Promise<void> {
-    const pending = asks.filter(
-      (a) => a.answer !== null && !a.trace.some((t) => t.event === "delivered"),
+    await this.markDeliveredById(
+      asks
+        .filter(
+          (a) =>
+            a.answer !== null && !a.trace.some((t) => t.event === "delivered"),
+        )
+        .map((a) => a.id),
+      now,
     );
-    if (pending.length === 0) return;
+  }
+
+  /** Like {@link markDelivered}, for ids; Asks without an answer are skipped. */
+  async markDeliveredById(ids: readonly string[], now: number): Promise<void> {
+    if (ids.length === 0) return;
     await this.db.batch(
-      pending.map((a) =>
+      ids.map((id) =>
         this.db
           .prepare(
             `INSERT OR IGNORE INTO trace (id, ask_id, event, at)
              SELECT ?1, ask_id, 'delivered', ?2 FROM answers WHERE ask_id = ?3`,
           )
-          .bind(ulid(now), now, a.id),
+          .bind(ulid(now), now, id),
       ),
     );
   }
@@ -717,6 +733,16 @@ export class Store {
     return (await this.hydrate(rows.results)).map((s) => s.ask);
   }
 
+  async openCount(githubId: number): Promise<number> {
+    const row = await this.db
+      .prepare(
+        "SELECT count(*) AS n FROM asks WHERE responder_id = ? AND state = 'open'",
+      )
+      .bind(githubId)
+      .first<{ n: number }>();
+    return row?.n ?? 0;
+  }
+
   /** Answers not delivered, or delivered without a terminal event, past the requester's expected times. */
   async stalledFor(
     githubId: number,
@@ -793,10 +819,11 @@ export class Store {
       .prepare(
         `SELECT a.id, a.title, a.urgency, a.risk, a.repo, r.name, p.ntfy_topic FROM ${ASK_FROM}
          WHERE a.state = 'open' AND a.pushed_at IS NULL AND a.push_due_at <= ?1
+           AND (a.push_claimed_at IS NULL OR a.push_claimed_at <= ?4)
            AND p.ntfy_topic IS NOT NULL AND (?2 IS NULL OR a.id = ?2)
          ORDER BY a.push_due_at LIMIT ?3`,
       )
-      .bind(now, askId, limit)
+      .bind(now, askId, limit, now - SEND_LEASE_MS)
       .all<{
         id: string;
         title: string;
@@ -821,16 +848,27 @@ export class Store {
   async claimPush(askId: string, now: number): Promise<boolean> {
     const result = await this.db
       .prepare(
-        "UPDATE asks SET pushed_at = ? WHERE id = ? AND pushed_at IS NULL AND state = 'open'",
+        `UPDATE asks SET push_claimed_at = ?1
+         WHERE id = ?2 AND state = 'open' AND pushed_at IS NULL
+           AND (push_claimed_at IS NULL OR push_claimed_at <= ?3)`,
       )
-      .bind(now, askId)
+      .bind(now, askId, now - SEND_LEASE_MS)
       .run();
     return result.meta.changes === 1;
   }
 
+  async confirmPush(askId: string, now: number): Promise<void> {
+    await this.db
+      .prepare("UPDATE asks SET pushed_at = ? WHERE id = ?")
+      .bind(now, askId)
+      .run();
+  }
+
   async releasePush(askId: string): Promise<void> {
     await this.db
-      .prepare("UPDATE asks SET pushed_at = NULL WHERE id = ?")
+      .prepare(
+        "UPDATE asks SET push_claimed_at = NULL WHERE id = ? AND pushed_at IS NULL",
+      )
       .bind(askId)
       .run();
   }
@@ -855,16 +893,31 @@ export class Store {
   ): Promise<boolean> {
     const result = await this.db
       .prepare(
-        "INSERT OR IGNORE INTO digests (github_id, day, sent_at) VALUES (?, ?, ?)",
+        `INSERT INTO digests (github_id, day, claimed_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT (github_id, day) DO UPDATE SET claimed_at = excluded.claimed_at
+         WHERE digests.sent_at IS NULL AND digests.claimed_at <= ?4`,
       )
-      .bind(githubId, day, now)
+      .bind(githubId, day, now, now - SEND_LEASE_MS)
       .run();
     return result.meta.changes === 1;
   }
 
+  async confirmDigest(
+    githubId: number,
+    day: string,
+    now: number,
+  ): Promise<void> {
+    await this.db
+      .prepare("UPDATE digests SET sent_at = ? WHERE github_id = ? AND day = ?")
+      .bind(now, githubId, day)
+      .run();
+  }
+
   async releaseDigest(githubId: number, day: string): Promise<void> {
     await this.db
-      .prepare("DELETE FROM digests WHERE github_id = ? AND day = ?")
+      .prepare(
+        "DELETE FROM digests WHERE github_id = ? AND day = ? AND sent_at IS NULL",
+      )
       .bind(githubId, day)
       .run();
   }

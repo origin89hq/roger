@@ -79,7 +79,8 @@ CREATE TABLE asks (
   resume        TEXT,                      -- JSON
   expires_at    INTEGER,
   push_due_at   INTEGER,                   -- when to push; NULL for inbox-only
-  pushed_at     INTEGER,
+  push_claimed_at INTEGER,                 -- a sender's lease; expires if it never confirms
+  pushed_at     INTEGER,                   -- when ntfy accepted the push
   state         TEXT NOT NULL DEFAULT 'open',
   created_at    INTEGER NOT NULL,
   closed_at     INTEGER,
@@ -136,6 +137,7 @@ CREATE UNIQUE INDEX ask_events_one_close ON ask_events (ask_id) WHERE state <> '
 CREATE TABLE digests (
   github_id     INTEGER NOT NULL REFERENCES responders(github_id),
   day           TEXT NOT NULL,             -- local date, YYYY-MM-DD
-  sent_at       INTEGER NOT NULL,
+  claimed_at    INTEGER NOT NULL,          -- a sender's lease; expires if it never confirms
+  sent_at       INTEGER,                   -- when ntfy accepted the digest
   PRIMARY KEY (github_id, day)
 );

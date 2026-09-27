@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { runCron } from "../src/cron.ts";
 import type { Ask } from "../src/protocol.gen.ts";
+import { SEND_LEASE_MS } from "../src/store.ts";
 import {
   agent,
   approval,
@@ -100,6 +101,26 @@ describe("pushes", () => {
         tags: [],
         click: `${ORIGIN}/#ask=${ask.id}`,
       },
+    ]);
+  });
+
+  it("sends again after the lease when a sender claimed a push and never confirmed it", async () => {
+    const svc = services();
+    const topic = newTopic();
+    const me = await person(svc, topic);
+    const bot = await requester(svc, me);
+    const ask = await createAsk(svc, bot.token, question({ urgency: "soon" }));
+    svc.clock.now = MONDAY_10AM + minutes(30);
+    // A sender that died between claiming and sending.
+    expect(await svc.store.claimPush(ask.id, svc.clock.now)).toBe(true);
+    await runCron(svc);
+    expect(askPushes(svc, topic)).toEqual([]);
+    svc.clock.now += SEND_LEASE_MS;
+    await runCron(svc);
+    svc.clock.now += minutes(5);
+    await runCron(svc);
+    expect(askPushes(svc, topic).map((p) => p.click)).toEqual([
+      `${ORIGIN}/#ask=${ask.id}`,
     ]);
   });
 
@@ -273,6 +294,21 @@ describe("digest", () => {
     expect(digests(svc, topic).map((p) => p.message)).toEqual([
       `${bot.name} (1)\n• Merge: counted`,
     ]);
+  });
+
+  it("sends the digest after the lease when a sender claimed it and never confirmed", async () => {
+    const { svc, topic, me } = await withOpenAsk(MONDAY_10AM);
+    const day = "2026-09-28";
+    expect(await svc.store.claimDigest(me.githubId, day, svc.clock.now)).toBe(
+      true,
+    );
+    await runCron(svc);
+    expect(digests(svc, topic)).toEqual([]);
+    svc.clock.now += SEND_LEASE_MS;
+    await runCron(svc);
+    svc.clock.now += minutes(5);
+    await runCron(svc);
+    expect(digests(svc, topic)).toHaveLength(1);
   });
 
   it("retries a failed digest on the next run", async () => {

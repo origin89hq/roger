@@ -33,6 +33,7 @@ async function sendDigests(svc: Services, now: number): Promise<void> {
     if (!(await svc.store.claimDigest(githubId, day, now))) continue;
     try {
       await notifier.send(topic, digestPush(open, config.origin));
+      await svc.store.confirmDigest(githubId, day, now);
     } catch (error) {
       await svc.store.releaseDigest(githubId, day);
       console.warn({ event: "digest_failed", githubId, error: String(error) });

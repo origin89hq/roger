@@ -85,8 +85,11 @@ export async function pushAsk(
   if (!svc.notifier) return;
   for (const job of await svc.store.duePushes(now, 50, askId)) {
     if (!(await svc.store.claimPush(job.askId, now))) continue;
+    // A sender that dies before confirming loses its lease and the push is
+    // sent again: pushes are at least once, never silently dropped.
     try {
       await svc.notifier.send(job.topic, askPush(job, svc.config.origin));
+      await svc.store.confirmPush(job.askId, now);
     } catch (error) {
       // The next cron run retries it.
       await svc.store.releasePush(job.askId);
@@ -236,15 +239,7 @@ export function createApp(svc: Services): Hono<Env> {
       after,
       LIMITS.page,
     );
-    if (page.askIds.length > 0) {
-      const answered = await Promise.all(
-        page.askIds.map((id) => svc.store.getAsk(id)),
-      );
-      await svc.store.markDelivered(
-        answered.flatMap((s) => (s ? [s.ask] : [])),
-        svc.now(),
-      );
-    }
+    await svc.store.markDeliveredById(page.askIds, svc.now());
     return json({
       events: page.events,
       next: page.events.at(-1)?.cursor ?? after,
@@ -323,7 +318,9 @@ export function createApp(svc: Services): Hono<Env> {
       svc.store.openFor(me.githubId, INBOX_LIMIT),
       svc.store.stalledFor(me.githubId, now, INBOX_LIMIT),
     ]);
-    return json({ open, stalled, now });
+    // The list is bounded; the total tells the page when more are waiting.
+    const openTotal = await svc.store.openCount(me.githubId);
+    return json({ open, stalled, openTotal, now });
   });
 
   inbox.get("/history", async (c) => {
@@ -512,8 +509,8 @@ export function createApp(svc: Services): Hono<Env> {
     return new Response(null, { status: 201 });
   });
 
-  inbox.get("/requesters", async () =>
-    json({ requesters: await svc.accounts.requesters() }),
+  inbox.get("/requesters", async (c) =>
+    json(await svc.accounts.requesters(c.get("responder").githubId, 100)),
   );
 
   inbox.post("/requesters", async (c) => {

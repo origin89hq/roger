@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import {
   cloudflareTest,
   readD1Migrations,
@@ -6,7 +7,7 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig(async () => {
   const migrations = await readD1Migrations(
-    new URL("./migrations", import.meta.url).pathname,
+    fileURLToPath(new URL("./migrations", import.meta.url)),
   );
   return {
     plugins: [

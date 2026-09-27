@@ -226,16 +226,35 @@ export class Accounts {
       : null;
   }
 
-  async requesters(): Promise<RequesterView[]> {
-    const [requesters, tokens] = await this.db.batch([
-      this.db.prepare(
+  /**
+   * The requesters `owner` created, enabled first, at most `limit`, each with
+   * its 20 most recent tokens. `truncated` says whether more exist.
+   */
+  async requesters(
+    owner: number,
+    limit: number,
+  ): Promise<{ requesters: RequesterView[]; truncated: boolean }> {
+    const listed = await this.db
+      .prepare(
         `SELECT r.*, p.login AS created_by_login FROM requesters r
-         LEFT JOIN responders p ON p.github_id = r.created_by ORDER BY r.name`,
-      ),
-      this.db.prepare(
-        "SELECT id, requester_id, created_at, revoked_at FROM tokens ORDER BY created_at",
-      ),
-    ]);
+         LEFT JOIN responders p ON p.github_id = r.created_by
+         WHERE r.created_by = ?
+         ORDER BY r.disabled_at IS NOT NULL, r.name LIMIT ?`,
+      )
+      .bind(owner, limit + 1)
+      .all();
+    const page = listed.results.slice(0, limit);
+    const tokens = await this.db
+      .prepare(
+        `SELECT id, requester_id, created_at, revoked_at FROM (
+           SELECT t.*, row_number() OVER (
+             PARTITION BY requester_id ORDER BY created_at DESC) AS n
+           FROM tokens t
+           WHERE requester_id IN (SELECT value FROM json_each(?)))
+         WHERE n <= 20 ORDER BY created_at`,
+      )
+      .bind(JSON.stringify(page.map((r) => r.id)))
+      .all();
     type Row = {
       id: string;
       name: string;
@@ -252,21 +271,24 @@ export class Accounts {
       revoked_at: number | null;
     };
     const byRequester = new Map<string, RequesterView["tokens"]>();
-    for (const t of (tokens?.results ?? []) as TokenRow[]) {
+    for (const t of tokens.results as TokenRow[]) {
       const list = byRequester.get(t.requester_id) ?? [];
       list.push({ id: t.id, createdAt: t.created_at, revokedAt: t.revoked_at });
       byRequester.set(t.requester_id, list);
     }
-    return ((requesters?.results ?? []) as Row[]).map((r) => ({
-      id: r.id,
-      name: r.name,
-      pickupMinutes: r.pickup_minutes,
-      completionMinutes: r.completion_minutes,
-      createdBy: r.created_by_login,
-      createdAt: r.created_at,
-      disabledAt: r.disabled_at,
-      tokens: byRequester.get(r.id) ?? [],
-    }));
+    return {
+      truncated: listed.results.length > limit,
+      requesters: (page as Row[]).map((r) => ({
+        id: r.id,
+        name: r.name,
+        pickupMinutes: r.pickup_minutes,
+        completionMinutes: r.completion_minutes,
+        createdBy: r.created_by_login,
+        createdAt: r.created_at,
+        disabledAt: r.disabled_at,
+        tokens: byRequester.get(r.id) ?? [],
+      })),
+    };
   }
 
   /** Returns the new requester's id, or `null` if the name is taken. */
