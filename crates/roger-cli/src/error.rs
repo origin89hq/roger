@@ -5,7 +5,7 @@ use roger_protocol::{ErrorCode, UnknownVariant};
 /// Everything that makes `roger` exit 1.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("no token: set ROGER_TOKEN or ROGER_TOKEN_FILE")]
+    #[error("no token: set ROGER_TOKEN or ROGER_TOKEN_FILE, or save it to ~/.config/roger/token")]
     MissingToken,
     #[error("reading token file {}: {source}", path.display())]
     TokenFile {
@@ -55,6 +55,9 @@ pub enum Error {
     TooManyPages(usize),
     #[error("writing output: {0}")]
     Output(#[source] std::io::Error),
+    /// `roger skill` was given a name it does not ship.
+    #[error("unknown skill `{name}`; known skills: {known}")]
+    UnknownSkill { name: String, known: String },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

@@ -17,13 +17,20 @@ pub const DEFAULT_URL: &str = "https://roger.origin89.com";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Picks the token from `ROGER_TOKEN`, else from the file `ROGER_TOKEN_FILE`
-/// names. Surrounding whitespace is ignored; an empty token counts as missing.
-pub fn resolve_token(token: Option<&str>, token_file: Option<&Path>) -> Result<String> {
+/// names, else from `default_file` when it exists. Surrounding whitespace is
+/// ignored; an empty token counts as missing.
+pub fn resolve_token(
+    token: Option<&str>,
+    token_file: Option<&Path>,
+    default_file: Option<&Path>,
+) -> Result<String> {
     if let Some(token) = token.map(str::trim).filter(|t| !t.is_empty()) {
         return Ok(token.to_owned());
     }
-    let Some(path) = token_file else {
-        return Err(Error::MissingToken);
+    let path = match (token_file, default_file) {
+        (Some(path), _) => path,
+        (None, Some(path)) if path.is_file() => path,
+        (None, _) => return Err(Error::MissingToken),
     };
     let contents = read_token_file(path)?;
     let token = contents.trim();
@@ -359,26 +366,35 @@ mod tests {
 
     #[test]
     fn token_comes_from_env_then_file() -> TestResult {
-        assert_eq!(resolve_token(Some(" tok\n"), None)?, "tok");
+        assert_eq!(resolve_token(Some(" tok\n"), None, None)?, "tok");
 
         let dir = std::env::temp_dir().join(format!("roger-cli-token-{}", std::process::id()));
         std::fs::create_dir_all(&dir)?;
         let file = dir.join("token");
         std::fs::write(&file, "from-file\n")?;
-        assert_eq!(resolve_token(Some("  "), Some(&file))?, "from-file");
-        assert_eq!(resolve_token(Some("env"), Some(&file))?, "env");
+        assert_eq!(resolve_token(Some("  "), Some(&file), None)?, "from-file");
+        assert_eq!(resolve_token(Some("env"), Some(&file), None)?, "env");
+        // The default file is used only when nothing else names a token.
+        assert_eq!(resolve_token(None, None, Some(&file))?, "from-file");
+        let other = dir.join("other");
+        std::fs::write(&other, "named\n")?;
+        assert_eq!(resolve_token(None, Some(&other), Some(&file))?, "named");
+        assert!(matches!(
+            resolve_token(None, None, Some(&dir.join("absent"))),
+            Err(Error::MissingToken)
+        ));
 
         std::fs::write(&file, "\n")?;
         assert!(matches!(
-            resolve_token(None, Some(&file)),
+            resolve_token(None, Some(&file), None),
             Err(Error::MissingToken)
         ));
         assert!(matches!(
-            resolve_token(None, Some(&dir.join("absent"))),
+            resolve_token(None, Some(&dir.join("absent")), None),
             Err(Error::TokenFile { .. })
         ));
         assert!(matches!(
-            resolve_token(None, None),
+            resolve_token(None, None, None),
             Err(Error::MissingToken)
         ));
         std::fs::remove_dir_all(&dir)?;

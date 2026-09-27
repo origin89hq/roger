@@ -13,7 +13,8 @@ Ask a person for a decision and read the answer back.
 
 Configuration comes from the environment:
   ROGER_TOKEN        agent token
-  ROGER_TOKEN_FILE   file holding the token, used when ROGER_TOKEN is unset
+  ROGER_TOKEN_FILE   file holding the token, used when ROGER_TOKEN is unset;
+                     defaults to ~/.config/roger/token
   ROGER_URL          API base URL (default https://roger.origin89.com)
 
 `get` and `wait` print the Ask as JSON and exit with:
@@ -53,6 +54,12 @@ pub enum Command {
     Withdraw { id: AskId },
     /// Record what happened after an answer.
     Trace(TraceArgs),
+    /// Print an agent skill for this version: `roger` (default), or an
+    /// integration such as `orca`.
+    Skill {
+        /// Skill name; omit for the core skill.
+        name: Option<String>,
+    },
 }
 
 #[derive(Debug, Args)]

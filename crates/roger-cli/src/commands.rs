@@ -66,6 +66,7 @@ pub fn run(client: &Client, command: Command) -> Result<u8> {
             print_json(&client.withdraw(&id)?)?;
             Ok(0)
         }
+        Command::Skill { name } => print_skill(name.as_deref()),
         Command::Trace(args) => {
             let TraceArgs {
                 id,
@@ -84,6 +85,33 @@ pub fn run(client: &Client, command: Command) -> Result<u8> {
             Ok(0)
         }
     }
+}
+
+/// Agent skills for this version of the CLI, by the name `roger skill` takes.
+/// The core skill comes first; each integration adds one entry.
+pub const SKILLS: &[(&str, &str)] = &[
+    ("roger", include_str!("../skills/roger/SKILL.md")),
+    ("orca", include_str!("../skills/roger-orca/SKILL.md")),
+];
+
+/// Prints the named skill, or the core skill when `name` is `None`.
+pub fn print_skill(name: Option<&str>) -> Result<u8> {
+    let name = name.unwrap_or("roger");
+    let (_, text) = SKILLS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .ok_or_else(|| Error::UnknownSkill {
+            name: name.to_owned(),
+            known: SKILLS
+                .iter()
+                .map(|(n, _)| *n)
+                .collect::<Vec<_>>()
+                .join(", "),
+        })?;
+    std::io::stdout()
+        .write_all(text.as_bytes())
+        .map_err(Error::Output)?;
+    Ok(0)
 }
 
 /// The exit code scripts branch on.
@@ -259,6 +287,35 @@ mod tests {
     use roger_protocol::{Risk, Urgency};
 
     use super::*;
+
+    /// The copies under `skills/` at the repository root, read by skill
+    /// installers, must match what the binary prints.
+    #[test]
+    fn repository_skills_match_the_embedded_ones() -> std::io::Result<()> {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../skills");
+        for (name, text) in SKILLS {
+            let folder = if *name == "roger" {
+                "roger".to_owned()
+            } else {
+                format!("roger-{name}")
+            };
+            let copy = std::fs::read_to_string(format!("{root}/{folder}/SKILL.md"))?;
+            assert!(
+                copy == *text,
+                "skills/{folder}/SKILL.md differs from crates/roger-cli/skills/{folder}/SKILL.md"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_skill_names_the_known_ones() {
+        let err = print_skill(Some("opencode")).err().map(|e| e.to_string());
+        assert_eq!(
+            err.as_deref(),
+            Some("unknown skill `opencode`; known skills: roger, orca")
+        );
+    }
     use crate::cli::Cli;
     use crate::test_support::ask;
 

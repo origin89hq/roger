@@ -28,9 +28,26 @@ its unfinished answers with `roger list --answered --unfinished` and reports
 what it did with `roger trace <id> dispatched|progress|applied|failed|not_applicable`.
 `roger --help` lists every flag.
 
-The CLI reads `ROGER_URL` (default `https://roger.origin89.com`) and a token
-from `ROGER_TOKEN` or the file named by `ROGER_TOKEN_FILE`. Create a requester
-and its token under Settings in the inbox.
+Install the CLI with `cargo install --locked roger-cli`; rerunning it updates
+to the latest release. It reads the token from `ROGER_TOKEN`, the file named by
+`ROGER_TOKEN_FILE`, or `~/.config/roger/token`, and `ROGER_URL` (default
+`https://roger.origin89.com`). Create a requester and its token under Settings
+in the inbox.
+
+## Agent skills
+
+The CLI ships the skills that tell an agent when and how to ask, matched to its
+version:
+
+| Skill | Print with | For |
+| --- | --- | --- |
+| [roger](skills/roger/SKILL.md) | `roger skill` | Any agent or script: asking, waiting, exit codes, tracing |
+| [roger-orca](skills/roger-orca/SKILL.md) | `roger skill orca` | Orca coordinators and the merge gate |
+
+The canonical files live in `crates/roger-cli/skills/`; `skills/` holds copies
+for skill installers, and a test fails when they differ. Add an integration as
+`roger-<tool>` in both places and register it in `SKILLS` in
+`crates/roger-cli/src/commands.rs`.
 
 The design is the [Roger RFC](https://github.com/origin89hq/roger/issues/1).
 
@@ -57,6 +74,15 @@ just protocol   # regenerate the TypeScript after changing roger-protocol
 `http://localhost:8792`. Copy `apps/worker/.dev.vars.example` to
 `apps/worker/.dev.vars` and fill in a GitHub OAuth app whose callback is
 `http://localhost:8792/auth/callback`.
+
+## Releasing the CLI
+
+Bump `version` in `crates/roger-protocol/Cargo.toml` and
+`crates/roger-cli/Cargo.toml` (and the `roger-protocol` version in the root
+`Cargo.toml`), merge, then push the tag `v<version>` on that commit. The
+`release-crates` workflow checks that the tag matches, runs the Rust checks,
+and publishes both crates through crates.io trusted publishing from the
+`crates-io` environment, which accepts only `v*` tags.
 
 ## Deployment
 

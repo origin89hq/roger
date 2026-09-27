@@ -12,7 +12,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use crate::cli::Cli;
+use crate::cli::{Cli, Command};
 use crate::client::{Client, DEFAULT_URL, resolve_token};
 use crate::error::Result;
 
@@ -37,14 +37,31 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<u8> {
+    // Needs no token, so an agent can read it before setup.
+    if let Command::Skill { name } = &cli.command {
+        return commands::print_skill(name.as_deref());
+    }
     let token = std::env::var("ROGER_TOKEN").ok();
     let token_file = std::env::var_os("ROGER_TOKEN_FILE").map(PathBuf::from);
-    let token = resolve_token(token.as_deref(), token_file.as_deref())?;
+    let token = resolve_token(
+        token.as_deref(),
+        token_file.as_deref(),
+        default_token_file().as_deref(),
+    )?;
     let base = std::env::var("ROGER_URL")
         .ok()
         .filter(|url| !url.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_URL.to_owned());
     commands::run(&Client::new(base.trim(), &token), cli.command)
+}
+
+/// `$XDG_CONFIG_HOME/roger/token`, else `~/.config/roger/token`.
+fn default_token_file() -> Option<PathBuf> {
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+    Some(config.join("roger").join("token"))
 }
 
 #[cfg(test)]
