@@ -10,10 +10,11 @@ use roger_protocol::{
 };
 use serde::Serialize;
 
-use crate::cli::{AskArgs, Command, ListArgs, ListFormat, TraceArgs};
+use crate::cli::{ApiCommand, AskArgs, ListArgs, ListFormat, TraceArgs};
 use crate::client::{Client, ListFilter};
+use crate::credentials::{self, Credentials};
 use crate::error::{Error, Result};
-use crate::parse::{github_repo_from_remote, refs_to_map, whole_minutes};
+use crate::parse::{MachineName, github_repo_from_remote, refs_to_map, whole_minutes};
 use crate::wait::{SystemClock, wait};
 
 /// Largest `--body-file` accepted.
@@ -22,9 +23,9 @@ const MAX_BODY_BYTES: u64 = 1024 * 1024;
 const MAX_PAGES: usize = 50;
 
 /// Runs a command and returns the process exit code.
-pub fn run(client: &Client, command: Command) -> Result<u8> {
+pub fn run(client: &Client, command: ApiCommand) -> Result<u8> {
     match command {
-        Command::Ask(args) => {
+        ApiCommand::Ask(args) => {
             let body = match &args.body_file {
                 Some(path) => Some(read_body(path)?),
                 None => args.body.clone(),
@@ -46,17 +47,17 @@ pub fn run(client: &Client, command: Command) -> Result<u8> {
             print_json(&ask)?;
             Ok(exit_code(ask.outcome()))
         }
-        Command::Get { id } => {
+        ApiCommand::Get { id } => {
             let ask = client.get(&id)?;
             print_json(&ask)?;
             Ok(exit_code(ask.outcome()))
         }
-        Command::Wait { id, timeout } => {
+        ApiCommand::Wait { id, timeout } => {
             let ask = wait(|| client.get(&id), &mut SystemClock, timeout)?;
             print_json(&ask)?;
             Ok(exit_code(ask.outcome()))
         }
-        Command::List(args) => {
+        ApiCommand::List(args) => {
             let filter = list_filter(&args);
             let asks = collect_pages(|after| client.list_page(&filter, after))?;
             match args.format {
@@ -65,12 +66,16 @@ pub fn run(client: &Client, command: Command) -> Result<u8> {
             }
             Ok(0)
         }
-        Command::Withdraw { id } => {
+        ApiCommand::Withdraw { id } => {
             print_json(&client.withdraw(&id)?)?;
             Ok(0)
         }
-        Command::Skill { name } => print_skill(name.as_deref()),
-        Command::Trace(args) => {
+        ApiCommand::Adopt { name } => {
+            print_json(&client.adopt(&name)?)?;
+            eprintln!("roger: `--as {name}` now acts as the requester {name} on this machine");
+            Ok(0)
+        }
+        ApiCommand::Trace(args) => {
             let TraceArgs {
                 id,
                 event,
@@ -94,6 +99,76 @@ pub fn run(client: &Client, command: Command) -> Result<u8> {
             Ok(0)
         }
     }
+}
+
+/// `roger login`: runs device authorization, saves the new credential, and
+/// only then revokes the login it replaces, so a denied or expired login
+/// leaves the old one working.
+pub fn login(base: &str, path: &Path, machine: Option<MachineName>) -> Result<u8> {
+    let old = credentials::load(path)?;
+    // The device endpoints take no credential.
+    let client = Client::new(base, "", None);
+    let suggested = machine.or_else(host_machine_name);
+    let started = client.device_code(suggested.as_ref())?;
+    let token = crate::login::login(
+        &started,
+        |code| client.device_token(code),
+        &mut SystemClock,
+        &mut std::io::stderr(),
+    )?;
+    credentials::save(
+        path,
+        &Credentials {
+            url: base.to_owned(),
+            machine: token.machine.clone(),
+            owner: token.owner.clone(),
+            credential: token.access_token,
+        },
+    )?;
+    // Under the same name the Worker already revoked it; this covers a new name.
+    if let Some(old) = old.filter(|old| old.url == base)
+        && let Err(err) = revoke(&old)
+    {
+        eprintln!(
+            "roger: could not revoke the previous login of {}: {err}; revoke it in Settings",
+            old.machine
+        );
+    }
+    eprintln!(
+        "roger: logged in as machine {machine} for @{owner}. Name each automation with --as <name> \
+         or ROGER_REQUESTER; without a name, calls act as {machine}/default.",
+        machine = token.machine,
+        owner = token.owner,
+    );
+    Ok(0)
+}
+
+/// `roger logout`: revokes the saved login where it was issued, then deletes it.
+pub fn logout(path: &Path) -> Result<u8> {
+    let saved = credentials::load(path)?.ok_or(Error::NotLoggedIn)?;
+    revoke(&saved)?;
+    credentials::remove(path)?;
+    eprintln!("roger: logged out {}", saved.machine);
+    Ok(0)
+}
+
+/// Revokes a saved login. One the server no longer accepts is already revoked.
+fn revoke(saved: &Credentials) -> Result<()> {
+    match Client::new(&saved.url, &saved.credential, None).logout() {
+        Ok(()) | Err(Error::Api { status: 401, .. }) => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+/// This host's name as a machine name, if `hostname` answers with a usable one.
+fn host_machine_name() -> Option<MachineName> {
+    let output = Process::new("hostname")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    MachineName::from_host(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// Agent skills for this version of the CLI, by the name `roger skill` takes.
@@ -406,7 +481,7 @@ mod tests {
             Some("unknown skill `opencode`; known skills: roger, orca")
         );
     }
-    use crate::cli::Cli;
+    use crate::cli::{Cli, Command};
     use crate::test_support::ask;
 
     fn ask_args(extra: &[&str]) -> AskArgs {
@@ -428,7 +503,7 @@ mod tests {
         ];
         command_line.extend_from_slice(extra);
         match Cli::try_parse_from(command_line).map(|cli| cli.command) {
-            Ok(Command::Ask(args)) => *args,
+            Ok(Command::Api(ApiCommand::Ask(args))) => *args,
             other => panic!("unexpected {other:?}"),
         }
     }

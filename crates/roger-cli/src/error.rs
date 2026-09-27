@@ -5,8 +5,38 @@ use roger_protocol::{ErrorCode, UnknownVariant};
 /// Everything that makes `roger` exit 1.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("no token: set ROGER_TOKEN or ROGER_TOKEN_FILE, or save it to ~/.config/roger/token")]
+    #[error(
+        "not logged in: run `roger login`, or set ROGER_TOKEN or ROGER_TOKEN_FILE to a requester token"
+    )]
     MissingToken,
+    #[error("--as and ROGER_REQUESTER need `roger login`; a token is already one requester")]
+    AsNeedsLogin,
+    #[error("this machine is not logged in; run `roger login`")]
+    NotLoggedIn,
+    #[error("{} holds a login for {saved}, not {url}; run `roger login`", path.display())]
+    CredentialsForOtherServer {
+        path: PathBuf,
+        saved: String,
+        url: String,
+    },
+    #[error("{action} credentials file {}: {source}", path.display())]
+    CredentialsFile {
+        action: &'static str,
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("no config directory: set HOME or XDG_CONFIG_HOME")]
+    NoConfigDir,
+    #[error("the login was denied in the inbox")]
+    LoginDenied,
+    #[error("the login code expired before it was approved; run `roger login` again")]
+    LoginExpired,
+    #[error("login failed: {0}")]
+    Login(String),
+    #[error("invalid requester name `{0}`: use lowercase letters, digits, and ._@-")]
+    InvalidRequesterName(String),
+    #[error("invalid machine name `{0}`: use lowercase letters, digits, and -, at most 40")]
+    InvalidMachineName(String),
     #[error("reading token file {}: {source}", path.display())]
     TokenFile {
         path: PathBuf,

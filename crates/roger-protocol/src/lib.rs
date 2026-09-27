@@ -548,6 +548,77 @@ pub struct ErrorBody {
     pub error: ErrorDetail,
 }
 
+/// The `client_id` the CLI sends to the device authorization endpoints.
+pub const DEVICE_CLIENT_ID: &str = "roger-cli";
+
+/// The `grant_type` of a device access token request (RFC 8628, section 3.4).
+pub const DEVICE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_code";
+
+/// The header naming the automation a machine credential acts for. Absent
+/// means `default`; the Worker resolves it to the requester `<machine>/<name>`.
+pub const REQUESTER_HEADER: &str = "roger-requester";
+
+/// Response of `POST /v1/device/code` (RFC 8628, section 3.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct DeviceAuthorization {
+    /// Secret the CLI polls with. Never shown to the person.
+    pub device_code: String,
+    /// Code the person confirms in the inbox, such as `BCDF-GHJK`.
+    pub user_code: String,
+    /// Where the person enters the code.
+    pub verification_uri: String,
+    /// `verification_uri` with the code filled in.
+    pub verification_uri_complete: String,
+    /// Seconds until both codes expire.
+    pub expires_in: u32,
+    /// Seconds the CLI waits between polls.
+    pub interval: u32,
+}
+
+/// Successful response of `POST /v1/device/token` (RFC 8628, section 3.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct MachineToken {
+    /// The machine credential. Shown once; the Worker stores only its hash.
+    pub access_token: String,
+    /// Always `Bearer`.
+    pub token_type: String,
+    /// The machine name the person chose when approving.
+    pub machine: String,
+    /// GitHub login of the person who approved, who owns the machine.
+    pub owner: String,
+}
+
+wire_enum! {
+    /// Error of the device token endpoint (RFC 8628, section 3.5, and RFC 6749).
+    DeviceError, "device error" {
+        /// The person has not approved or denied yet. Poll again.
+        AuthorizationPending = "authorization_pending",
+        /// Polled too fast. Add 5 seconds to the interval and poll again.
+        SlowDown = "slow_down",
+        /// The person denied the request.
+        AccessDenied = "access_denied",
+        /// The device code expired. Start over.
+        ExpiredToken = "expired_token",
+        /// Unknown or already used device code.
+        InvalidGrant = "invalid_grant",
+        /// A parameter is missing or malformed.
+        InvalidRequest = "invalid_request",
+        /// The client is not the Roger CLI.
+        InvalidClient = "invalid_client",
+        /// The grant type is not the device code grant.
+        UnsupportedGrantType = "unsupported_grant_type",
+    }
+}
+
+/// Error body of the device endpoints, in the OAuth form (RFC 6749, section 5.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct DeviceErrorBody {
+    /// What went wrong.
+    pub error: DeviceError,
+    /// Human-readable explanation.
+    pub error_description: String,
+}
+
 /// Renders the TypeScript types the Worker imports.
 ///
 /// # Errors
@@ -561,7 +632,10 @@ fn typescript() -> Result<String, specta_typescript::Error> {
         .register::<Ask>()
         .register::<AskList>()
         .register::<EventList>()
-        .register::<ErrorBody>();
+        .register::<ErrorBody>()
+        .register::<DeviceAuthorization>()
+        .register::<MachineToken>()
+        .register::<DeviceErrorBody>();
     specta_typescript::Typescript::default().export(&types, specta_serde::Format)
 }
 
@@ -606,6 +680,9 @@ mod tests {
         }
         for code in ErrorCode::ALL {
             assert_eq!(serde_json::to_string(code)?, format!("\"{code}\""));
+        }
+        for error in DeviceError::ALL {
+            assert_eq!(serde_json::to_string(error)?, format!("\"{error}\""));
         }
         Ok(())
     }

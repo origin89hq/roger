@@ -3,7 +3,9 @@
 mod cli;
 mod client;
 mod commands;
+mod credentials;
 mod error;
+mod login;
 mod parse;
 mod wait;
 
@@ -13,8 +15,10 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use crate::cli::{Cli, Command};
-use crate::client::{Client, DEFAULT_URL, resolve_token};
-use crate::error::Result;
+use crate::client::{Auth, Client, DEFAULT_URL, resolve_auth};
+use crate::credentials::config_file;
+use crate::error::{Error, Result};
+use crate::parse::RequesterName;
 
 fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
@@ -37,31 +41,63 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<u8> {
-    // Needs no token, so an agent can read it before setup.
-    if let Command::Skill { name } = &cli.command {
-        return commands::print_skill(name.as_deref());
-    }
-    let token = std::env::var("ROGER_TOKEN").ok();
-    let token_file = std::env::var_os("ROGER_TOKEN_FILE").map(PathBuf::from);
-    let token = resolve_token(
-        token.as_deref(),
-        token_file.as_deref(),
-        default_token_file().as_deref(),
-    )?;
     let base = std::env::var("ROGER_URL")
         .ok()
-        .filter(|url| !url.trim().is_empty())
+        .map(|url| url.trim().trim_end_matches('/').to_owned())
+        .filter(|url| !url.is_empty())
         .unwrap_or_else(|| DEFAULT_URL.to_owned());
-    commands::run(&Client::new(base.trim(), &token), cli.command)
-}
-
-/// `$XDG_CONFIG_HOME/roger/token`, else `~/.config/roger/token`.
-fn default_token_file() -> Option<PathBuf> {
-    let config = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|dir| !dir.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(config.join("roger").join("token"))
+    let command = match cli.command {
+        // Needs no token, so an agent can read it before setup.
+        Command::Skill { name } => return commands::print_skill(name.as_deref()),
+        Command::Login { machine } => {
+            let path = config_file("credentials").ok_or(Error::NoConfigDir)?;
+            return commands::login(&base, &path, machine);
+        }
+        Command::Logout => {
+            let path = config_file("credentials").ok_or(Error::NoConfigDir)?;
+            return commands::logout(&path);
+        }
+        Command::Api(command) => command,
+    };
+    let requester = match cli.requester {
+        Some(name) => Some(name),
+        None => std::env::var("ROGER_REQUESTER")
+            .ok()
+            .filter(|name| !name.trim().is_empty())
+            .map(|name| name.trim().parse::<RequesterName>())
+            .transpose()?,
+    };
+    let token = std::env::var("ROGER_TOKEN").ok();
+    let token_file = std::env::var_os("ROGER_TOKEN_FILE").map(PathBuf::from);
+    let credentials_file = config_file("credentials");
+    let auth = resolve_auth(
+        token.as_deref(),
+        token_file.as_deref(),
+        || match &credentials_file {
+            Some(path) => credentials::load(path),
+            None => Ok(None),
+        },
+        config_file("token").as_deref(),
+    )?;
+    let client = match auth {
+        Auth::Token(token) => {
+            if requester.is_some() {
+                return Err(Error::AsNeedsLogin);
+            }
+            Client::new(&base, &token, None)
+        }
+        Auth::Machine(saved) => {
+            if saved.url != base {
+                return Err(Error::CredentialsForOtherServer {
+                    path: credentials_file.unwrap_or_default(),
+                    saved: saved.url,
+                    url: base,
+                });
+            }
+            Client::new(&base, &saved.credential, requester.as_ref())
+        }
+    };
+    commands::run(&client, command)
 }
 
 #[cfg(test)]

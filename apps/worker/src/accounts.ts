@@ -3,6 +3,10 @@ import type { Requester, Responder } from "./store.ts";
 
 export const SESSION_MS = 8 * 60 * 60_000;
 export const CHALLENGE_MS = 5 * 60_000;
+/** Expected minutes from answer to delivered, unless a requester sets its own. */
+export const DEFAULT_PICKUP_MINUTES = 120;
+/** Expected minutes from delivered to terminal, unless a requester sets its own. */
+export const DEFAULT_COMPLETION_MINUTES = 24 * 60;
 
 export type ChallengePurpose = "answer" | "register" | "step_up";
 
@@ -238,7 +242,7 @@ export class Accounts {
       .prepare(
         `SELECT r.*, p.login AS created_by_login FROM requesters r
          LEFT JOIN responders p ON p.github_id = r.created_by
-         WHERE r.created_by = ?
+         WHERE r.created_by = ? AND instr(r.name, '/') = 0
          ORDER BY r.disabled_at IS NOT NULL, r.name LIMIT ?`,
       )
       .bind(owner, limit + 1)

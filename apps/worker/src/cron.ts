@@ -16,6 +16,7 @@ export async function runCron(svc: Services): Promise<void> {
   await sendDigests(svc, now);
   const purged = await svc.store.purgeOldContent(now, BATCH);
   await svc.accounts.sweep(now, BATCH);
+  await svc.machines.sweep(now, BATCH);
   console.info({ event: "cron", expired, purged });
 }
 

@@ -29,10 +29,33 @@ what it did with `roger trace <id> dispatched|progress|applied|failed|not_applic
 `roger --help` lists every flag.
 
 Install the CLI with `cargo install --locked roger-cli`; rerunning it updates
-to the latest release. It reads the token from `ROGER_TOKEN`, the file named by
-`ROGER_TOKEN_FILE`, or `~/.config/roger/token`, and `ROGER_URL` (default
-`https://roger.origin89.com`). Create a requester and its token under Settings
-in the inbox.
+to the latest release. Then log the machine in once:
+
+```sh
+roger login                      # prints a code; approve it in the inbox
+roger ask --as merge-gate ...    # or export ROGER_REQUESTER=merge-gate
+```
+
+`roger login` uses device authorization (RFC 8628): the person approves the
+code in the inbox and names the machine, such as `studio`. The CLI saves the
+machine credential to `~/.config/roger/credentials` with mode 0600; the Worker
+stores only its hash. Each automation names itself with `--as <name>` or
+`ROGER_REQUESTER`, and Roger resolves it to the requester `<machine>/<name>`,
+created on first use. A call without a name acts as `<machine>/default`.
+Asks, idempotency keys, decision keys, and `list` stay per requester, so jobs
+on one machine do not see each other's answers. Settings lists each machine
+and its requesters: disabling a requester stops one automation, and revoking
+the machine, or `roger logout` on it, stops all of them.
+
+Any process that can read a machine's credential can act as any of that
+machine's requesters, as every job on a machine could read a shared token file
+before. Requester names separate bookkeeping, not privilege.
+
+Requesters and tokens created under Settings keep working. `ROGER_TOKEN` and
+`ROGER_TOKEN_FILE` take precedence over the login, and `~/.config/roger/token`
+is read when there is no login. `roger adopt <name>` binds such a requester to
+the logged-in machine, so `--as <name>` there keeps its Asks. `ROGER_URL`
+defaults to `https://roger.origin89.com`.
 
 ## Agent skills
 

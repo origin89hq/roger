@@ -1,33 +1,61 @@
 import { type Context, Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { z } from "zod";
-import { type Accounts, SESSION_MS } from "./accounts.ts";
+import {
+  type Accounts,
+  DEFAULT_COMPLETION_MINUTES,
+  DEFAULT_PICKUP_MINUTES,
+  SESSION_MS,
+} from "./accounts.ts";
 import type { Config } from "./config.ts";
 import { evidenceProblem } from "./evidence.ts";
 import type { GitHub } from "./github.ts";
-import { failure, json, jsonBody } from "./http.ts";
+import { failure, formBody, json, jsonBody } from "./http.ts";
 import { canonicalJson, secret, sha256 } from "./ids.ts";
+import {
+  DEFAULT_AUTOMATION,
+  DEVICE_CODE_MS,
+  type Machine,
+  type Machines,
+  normalizeUserCode,
+  POLL_INTERVAL_MS,
+} from "./machines.ts";
 import { askPush, type Notifier, passkeyAddedPush } from "./notify.ts";
 import type { Passkeys } from "./passkeys.ts";
-import type { Ask, AskList, AskOption, EventList } from "./protocol.gen.ts";
+import type {
+  Ask,
+  AskList,
+  AskOption,
+  DeviceAuthorization,
+  DeviceError,
+  DeviceErrorBody,
+  EventList,
+  MachineToken,
+} from "./protocol.gen.ts";
 import {
   type AnswerRequest,
+  adoption,
   answer,
   answerChallenge,
   appendTrace,
   askId,
   createAsk,
   describeIssues,
+  deviceApproval,
+  deviceLookup,
   LIMITS,
   listFilter,
+  machineName,
   newRequester,
   notificationSettings,
+  requesterName,
 } from "./schemas.ts";
 import type { Requester, Responder, Store, TransitionResult } from "./store.ts";
 
 export interface Services {
   store: Store;
   accounts: Accounts;
+  machines: Machines;
   passkeys: Passkeys;
   github: GitHub;
   /** `null` when pushes are disabled. */
@@ -38,14 +66,20 @@ export interface Services {
   defer: (work: Promise<unknown>) => void;
 }
 
-type Env = { Variables: { requester: Requester; responder: Responder } };
+type Env = {
+  Variables: { requester: Requester; responder: Responder; machine: Machine };
+};
 
 const SESSION_COOKIE = "__Host-roger";
 const OAUTH_COOKIE = "__Host-roger-oauth";
-const DEFAULT_PICKUP_MINUTES = 120;
-const DEFAULT_COMPLETION_MINUTES = 24 * 60;
 const INBOX_LIMIT = 200;
 const HISTORY_LIMIT = 50;
+/** The CLI sends this with `roger login`, and any OAuth client can send it. */
+const DEVICE_CLIENT_ID = "roger-cli";
+const DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code";
+/** Names the automation a machine credential acts for. */
+const REQUESTER_HEADER = "roger-requester";
+const CREDENTIAL = /^Bearer ((?:roger|rogm)_[A-Za-z0-9_-]{43})$/;
 
 /**
  * An answer every Ask accepts: the responder's own message instead of one of
@@ -135,15 +169,210 @@ export function createApp(svc: Services): Hono<Env> {
   agent.use("/asks", bearer);
   agent.use("/asks/*", bearer);
   agent.use("/events", bearer);
+  agent.use("/machine/*", machineOnly);
+
+  /**
+   * Resolves the requester. A static token (`roger_`) is one requester. A
+   * machine credential (`rogm_`) acts as `<machine>/<name>` for the name in
+   * the Roger-Requester header, `default` when absent, created on first use.
+   */
   async function bearer(c: Context<Env>, next: () => Promise<void>) {
-    const header = c.req.header("authorization") ?? "";
-    const token = /^Bearer (roger_[A-Za-z0-9_-]{43})$/.exec(header)?.[1];
-    const requester = token ? await svc.accounts.requesterByToken(token) : null;
+    const credential = CREDENTIAL.exec(
+      c.req.header("authorization") ?? "",
+    )?.[1];
+    const named = c.req.header(REQUESTER_HEADER);
+    if (credential?.startsWith("rogm_")) {
+      const machine = await svc.machines.byCredential(credential);
+      if (!machine)
+        return failure(
+          401,
+          "unauthorized",
+          "This machine's login is unknown or revoked. Run roger login.",
+        );
+      const name = requesterName.safeParse(named ?? DEFAULT_AUTOMATION);
+      if (!name.success)
+        return failure(
+          400,
+          "invalid_request",
+          `${REQUESTER_HEADER}: ${describeIssues(name.error)}`,
+        );
+      const resolved = await svc.machines.requester(
+        machine,
+        name.data,
+        svc.now(),
+      );
+      switch (resolved.kind) {
+        case "ok":
+          c.set("requester", resolved.requester);
+          break;
+        case "disabled":
+          return failure(
+            403,
+            "forbidden",
+            `The requester ${resolved.name} is disabled.`,
+          );
+        case "refused":
+          return failure(403, "forbidden", resolved.message);
+        default: {
+          const unreachable: never = resolved;
+          throw new Error(`unknown resolution ${String(unreachable)}`);
+        }
+      }
+      return next();
+    }
+    const requester = credential
+      ? await svc.accounts.requesterByToken(credential)
+      : null;
     if (!requester)
       return failure(401, "unauthorized", "A valid agent token is required.");
+    if (named !== undefined)
+      return failure(
+        400,
+        "invalid_request",
+        "A token is already one requester; naming another needs roger login.",
+      );
     c.set("requester", requester);
     await next();
   }
+
+  /** Machine credentials only, for managing the login itself. */
+  async function machineOnly(c: Context<Env>, next: () => Promise<void>) {
+    const credential = CREDENTIAL.exec(
+      c.req.header("authorization") ?? "",
+    )?.[1];
+    const machine = credential?.startsWith("rogm_")
+      ? await svc.machines.byCredential(credential)
+      : null;
+    if (!machine)
+      return failure(
+        401,
+        "unauthorized",
+        "A machine login is required. Run roger login.",
+      );
+    c.set("machine", machine);
+    await next();
+  }
+
+  // Revokes the calling machine: `roger logout`.
+  agent.post("/machine/logout", async (c) => {
+    const machine = c.get("machine");
+    await svc.machines.revoke(machine.id, machine.owner, svc.now());
+    return c.body(null, 204);
+  });
+
+  // Binds a requester the owner made in Settings to this machine.
+  agent.post("/machine/adopt", async (c) => {
+    const body = await parse(c.req.raw, LIMITS.adminBytes, adoption);
+    if (!body.ok) return body.response;
+    return (await svc.machines.adopt(c.get("machine"), body.value.name))
+      ? json({ requester: body.value.name })
+      : failure(
+          404,
+          "not_found",
+          "No enabled requester of yours with that name is free to adopt.",
+        );
+  });
+
+  // ---- Device authorization (RFC 8628): no credentials ---------------------
+
+  function deviceError(error: DeviceError, description: string): Response {
+    const body: DeviceErrorBody = { error, error_description: description };
+    return json(body, error === "invalid_client" ? 401 : 400);
+  }
+
+  agent.post("/device/code", async (c) => {
+    const form = await formBody(c.req.raw, LIMITS.adminBytes);
+    if (!form)
+      return deviceError(
+        "invalid_request",
+        "Send a form body of at most 4 KiB.",
+      );
+    if (form.get("client_id") !== DEVICE_CLIENT_ID)
+      return deviceError(
+        "invalid_client",
+        `client_id must be ${DEVICE_CLIENT_ID}.`,
+      );
+    const suggested = form.get("machine");
+    if (suggested !== null && !machineName.safeParse(suggested).success)
+      return deviceError(
+        "invalid_request",
+        "machine must be a short lowercase name of letters, digits, and dashes.",
+      );
+    const started = await svc.machines.start(suggested, svc.now());
+    if (!started)
+      return failure(
+        503,
+        "internal",
+        "Too many logins are in progress. Try again later.",
+      );
+    const verify = `${svc.config.origin}/#device`;
+    return json({
+      device_code: started.deviceCode,
+      user_code: started.userCode,
+      verification_uri: verify,
+      verification_uri_complete: `${verify}=${started.userCode}`,
+      expires_in: DEVICE_CODE_MS / 1000,
+      interval: POLL_INTERVAL_MS / 1000,
+    } satisfies DeviceAuthorization);
+  });
+
+  agent.post("/device/token", async (c) => {
+    const form = await formBody(c.req.raw, LIMITS.adminBytes);
+    if (!form)
+      return deviceError(
+        "invalid_request",
+        "Send a form body of at most 4 KiB.",
+      );
+    if (form.get("client_id") !== DEVICE_CLIENT_ID)
+      return deviceError(
+        "invalid_client",
+        `client_id must be ${DEVICE_CLIENT_ID}.`,
+      );
+    if (form.get("grant_type") !== DEVICE_GRANT_TYPE)
+      return deviceError(
+        "unsupported_grant_type",
+        `grant_type must be ${DEVICE_GRANT_TYPE}.`,
+      );
+    const deviceCode = form.get("device_code");
+    if (!deviceCode || deviceCode.length > 64)
+      return deviceError("invalid_request", "device_code is required.");
+    const result = await svc.machines.poll(deviceCode, svc.now());
+    switch (result.kind) {
+      case "pending":
+        return deviceError(
+          "authorization_pending",
+          "Waiting for approval in the inbox.",
+        );
+      case "slow_down":
+        return deviceError(
+          "slow_down",
+          `Polling too fast; wait ${POLL_INTERVAL_MS / 1000} seconds longer.`,
+        );
+      case "denied":
+        return deviceError(
+          "access_denied",
+          "The login was denied in the inbox.",
+        );
+      case "expired":
+        return deviceError(
+          "expired_token",
+          "The login code expired. Run roger login again.",
+        );
+      case "invalid":
+        return deviceError("invalid_grant", result.message);
+      case "issued":
+        return json({
+          access_token: result.credential,
+          token_type: "Bearer",
+          machine: result.machine,
+          owner: result.owner,
+        } satisfies MachineToken);
+      default: {
+        const unreachable: never = result;
+        throw new Error(`unknown poll result ${String(unreachable)}`);
+      }
+    }
+  });
 
   /** Loads an Ask of this requester; other requesters' Asks do not exist. */
   async function ownAsk(c: Context<Env>): Promise<Ask | Response> {
@@ -577,6 +806,78 @@ export function createApp(svc: Services): Hono<Env> {
     ))
       ? new Response(null, { status: 204 })
       : failure(404, "not_found", "No active token of yours has that id."),
+  );
+
+  // Device logins and machines. User codes travel in bodies, never in URLs,
+  // so request logs never hold one.
+  inbox.post("/device", async (c) => {
+    const body = await parse(c.req.raw, LIMITS.adminBytes, deviceLookup);
+    if (!body.ok) return body.response;
+    const pending = await svc.machines.pending(body.value.userCode, svc.now());
+    return pending
+      ? json({ userCode: normalizeUserCode(body.value.userCode), ...pending })
+      : failure(
+          404,
+          "not_found",
+          "No login is waiting for that code. It may have expired.",
+        );
+  });
+
+  inbox.post("/device/approve", async (c) => {
+    const body = await parse(c.req.raw, LIMITS.adminBytes, deviceApproval);
+    if (!body.ok) return body.response;
+    const result = await svc.machines.approve(
+      body.value.userCode,
+      c.get("responder").githubId,
+      body.value.machine,
+      svc.now(),
+    );
+    switch (result.kind) {
+      case "approved":
+        return c.body(null, 204);
+      case "not_found":
+        return failure(
+          404,
+          "not_found",
+          "No login is waiting for that code. It may have expired.",
+        );
+      case "name_taken":
+        return failure(409, "conflict", result.message);
+      default: {
+        const unreachable: never = result;
+        throw new Error(`unknown approval ${String(unreachable)}`);
+      }
+    }
+  });
+
+  inbox.post("/device/deny", async (c) => {
+    const body = await parse(c.req.raw, LIMITS.adminBytes, deviceLookup);
+    if (!body.ok) return body.response;
+    return (await svc.machines.deny(
+      body.value.userCode,
+      c.get("responder").githubId,
+      svc.now(),
+    ))
+      ? c.body(null, 204)
+      : failure(
+          404,
+          "not_found",
+          "No login is waiting for that code. It may have expired.",
+        );
+  });
+
+  inbox.get("/machines", async (c) =>
+    json({ machines: await svc.machines.list(c.get("responder").githubId) }),
+  );
+
+  inbox.post("/machines/:id/revoke", async (c) =>
+    (await svc.machines.revoke(
+      c.req.param("id"),
+      c.get("responder").githubId,
+      svc.now(),
+    ))
+      ? c.body(null, 204)
+      : failure(404, "not_found", "No active machine of yours has that id."),
   );
 
   // ---- Sign-in -------------------------------------------------------------

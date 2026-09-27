@@ -7,7 +7,8 @@
 /** @typedef {{ ask: Ask, reason: "not_delivered" | "not_finished" }} Stalled */
 /** @typedef {{ login: string, githubId: number, ntfyTopic: string | null, pushes: boolean, passkeys: { id: string, createdAt: number, lastUsedAt: number | null }[] }} Me */
 /** @typedef {{ id: string, name: string, pickupMinutes: number, completionMinutes: number, createdBy: string | null, createdAt: number, disabledAt: number | null, tokens: { id: string, createdAt: number, revokedAt: number | null }[] }} RequesterView */
-/** @typedef {"inbox" | "history" | "settings"} View */
+/** @typedef {{ id: string, name: string, createdAt: number, requesters: { id: string, name: string, disabledAt: number | null }[] }} MachineView */
+/** @typedef {"inbox" | "history" | "settings" | "device"} View */
 
 const state = {
   /** @type {Me | null} */ me: null,
@@ -824,8 +825,11 @@ async function addPasskey() {
 async function renderSettings() {
   const me = state.me;
   if (!me) return;
-  /** @type {{ requesters: RequesterView[], truncated: boolean }} */
-  const { requesters, truncated } = await api("GET", "/v1/inbox/requesters");
+  /** @type {[{ requesters: RequesterView[], truncated: boolean }, { machines: MachineView[] }]} */
+  const [{ requesters, truncated }, { machines }] = await Promise.all([
+    api("GET", "/v1/inbox/requesters"),
+    api("GET", "/v1/inbox/machines"),
+  ]);
   const topic = /** @type {HTMLInputElement} */ (
     el("input", {
       value: me.ntfyTopic ?? "",
@@ -907,11 +911,84 @@ async function renderSettings() {
     el(
       "section",
       {},
+      el("h2", {}, "Machines"),
+      el(
+        "p",
+        {},
+        "Each machine logs in once with roger login. Its automations name themselves with --as and become requesters under the machine's name, created on first use. Any process on a machine can act as any of its requesters. Disable a requester to stop one automation; revoke the machine to stop all of them.",
+      ),
+      machines.length
+        ? el(
+            "table",
+            {},
+            el(
+              "tr",
+              {},
+              el("th", {}, "Machine"),
+              el("th", {}, "Requesters"),
+              el("th", {}),
+            ),
+            ...machines.map((m) =>
+              el(
+                "tr",
+                {},
+                el(
+                  "td",
+                  {},
+                  m.name,
+                  el(
+                    "div",
+                    { class: "none" },
+                    `Logged in ${when(m.createdAt)}`,
+                  ),
+                ),
+                el(
+                  "td",
+                  {},
+                  ...m.requesters.map((r) =>
+                    el(
+                      "div",
+                      {},
+                      `${r.name} `,
+                      r.disabledAt
+                        ? "(disabled)"
+                        : el(
+                            "button",
+                            {
+                              class: "quiet",
+                              onclick: () => void disable(r.id),
+                            },
+                            "Disable",
+                          ),
+                    ),
+                  ),
+                ),
+                el(
+                  "td",
+                  {},
+                  el(
+                    "button",
+                    { class: "quiet", onclick: () => void revokeMachine(m.id) },
+                    "Revoke",
+                  ),
+                ),
+              ),
+            ),
+          )
+        : el(
+            "p",
+            { class: "none" },
+            "No machine is logged in. Run roger login on one.",
+          ),
+    ),
+    el(
+      "section",
+      {},
       el("h2", {}, "Your requesters"),
       el(
         "p",
         {},
-        "Each automation gets its own requester and token. Its Asks come to you unless they name someone with --to. Only you can issue or revoke its tokens.",
+        "Requesters with their own token, for automations that do not use roger login. Its Asks come to you unless they name someone with --to. Only you can issue or revoke its tokens. A logged-in machine can adopt one with roger adopt.",
       ),
       truncated ? el("p", { class: "none" }, "Showing the first 100.") : null,
       el(
@@ -1027,6 +1104,113 @@ async function revoke(id) {
 }
 
 /** @param {string} id */
+async function revokeMachine(id) {
+  try {
+    await api("POST", `/v1/inbox/machines/${id}/revoke`);
+    await renderSettings();
+  } catch (error) {
+    notify(error instanceof Error ? error.message : String(error), true);
+  }
+}
+
+// ---- Machine login ---------------------------------------------------------------
+
+/**
+ * Approves or denies a `roger login`. The code comes from the URL fragment,
+ * which the browser never sends, and goes to the API only in request bodies.
+ * @param {string} prefilled
+ */
+function renderDevice(prefilled) {
+  const code = /** @type {HTMLInputElement} */ (
+    el("input", {
+      value: prefilled,
+      placeholder: "BCDF-GHJK",
+      autocomplete: "off",
+      "aria-label": "Code from roger login",
+    })
+  );
+  const result = el("div");
+  const lookup = async () => {
+    try {
+      /** @type {{ userCode: string, suggested: string | null, createdAt: number, expiresAt: number }} */
+      const pending = await api("POST", "/v1/inbox/device", {
+        userCode: code.value.trim(),
+      });
+      const machine = /** @type {HTMLInputElement} */ (
+        el("input", {
+          value: pending.suggested ?? "",
+          placeholder: "studio",
+          "aria-label": "Machine name",
+        })
+      );
+      /** @param {"approve" | "deny"} verb */
+      const decide = async (verb) => {
+        try {
+          await api(
+            "POST",
+            `/v1/inbox/device/${verb}`,
+            verb === "approve"
+              ? { userCode: pending.userCode, machine: machine.value.trim() }
+              : { userCode: pending.userCode },
+          );
+          result.replaceChildren(
+            el(
+              "p",
+              {},
+              verb === "approve"
+                ? `Approved. ${machine.value.trim()} is logged in once roger login finishes.`
+                : "Denied. roger login stops on that machine.",
+            ),
+          );
+        } catch (error) {
+          notify(error instanceof Error ? error.message : String(error), true);
+        }
+      };
+      result.replaceChildren(
+        el(
+          "p",
+          {},
+          `A login started ${ago(pending.createdAt)} is waiting for this code. Name the machine; its automations become requesters named after it, such as ${pending.suggested ?? "studio"}/default. A machine of yours with the same name is logged out and this one takes over its requesters.`,
+        ),
+        el(
+          "div",
+          { class: "inline-form" },
+          machine,
+          el("button", { onclick: () => void decide("approve") }, "Approve"),
+          el(
+            "button",
+            { class: "quiet", onclick: () => void decide("deny") },
+            "Deny",
+          ),
+        ),
+      );
+    } catch (error) {
+      notify(error instanceof Error ? error.message : String(error), true);
+    }
+  };
+  $("device-view").replaceChildren(
+    el(
+      "section",
+      {},
+      el("h2", {}, "Log in a machine"),
+      el(
+        "p",
+        {},
+        "Approve only a code that roger login just printed in your own terminal. The machine can then ask you for decisions and read your answers as any of its requesters, until you revoke it in Settings.",
+      ),
+      el(
+        "div",
+        { class: "inline-form" },
+        code,
+        el("button", { onclick: () => void lookup() }, "Continue"),
+      ),
+      result,
+    ),
+  );
+  if (prefilled) void lookup();
+}
+
+/** @param {string} id */
 async function disable(id) {
   try {
     await api("POST", `/v1/inbox/requesters/${id}/disable`);
@@ -1041,7 +1225,12 @@ async function disable(id) {
 function showSignedOut() {
   state.me = null;
   $("nav").hidden = true;
-  for (const id of ["inbox-view", "history-view", "settings-view"])
+  for (const id of [
+    "inbox-view",
+    "history-view",
+    "settings-view",
+    "device-view",
+  ])
     $(id).hidden = true;
   $("signed-out").hidden = false;
 }
@@ -1083,6 +1272,7 @@ async function show(view) {
   $("inbox-view").hidden = view !== "inbox";
   $("history-view").hidden = view !== "history";
   $("settings-view").hidden = view !== "settings";
+  $("device-view").hidden = view !== "device";
   try {
     if (view === "inbox") await loadInbox();
     if (view === "history") await loadHistory(false);
@@ -1097,6 +1287,13 @@ async function route() {
   const hash = location.hash.slice(1);
   const [name, id] = hash.split("=");
   if (name === "settings") return show("settings");
+  if (name === "device") {
+    await show("device");
+    // Drop the code from the address bar and history once read.
+    if (id) history.replaceState(null, "", "#device");
+    renderDevice(id ?? "");
+    return;
+  }
   if (name === "history") {
     await show("history");
     if (id) await select(id);

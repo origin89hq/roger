@@ -219,10 +219,31 @@ export type AnswerRequest = z.infer<typeof answer>;
 
 export const answerChallenge = answer.omit({ assertion: true });
 
+/** A requester name made in Settings, or an automation name from `--as`. */
+export const requesterName = z
+  .string()
+  .regex(/^[a-z0-9][a-z0-9._@-]{0,79}$/, "must be a short lowercase name");
+
+/** A machine name chosen at `roger login`, such as `studio`. */
+export const machineName = z
+  .string()
+  .regex(
+    /^[a-z0-9][a-z0-9-]{0,39}$/,
+    "must be a short lowercase name of letters, digits, and dashes",
+  );
+
+/** A user code as the person types it; normalized before lookup. */
+const userCode = z.string().min(1).max(20);
+
+export const deviceLookup = z.strictObject({ userCode });
+export const deviceApproval = z.strictObject({
+  userCode,
+  machine: machineName,
+});
+export const adoption = z.strictObject({ name: requesterName });
+
 export const newRequester = z.strictObject({
-  name: z
-    .string()
-    .regex(/^[a-z0-9][a-z0-9._@-]{0,79}$/, "must be a short lowercase name"),
+  name: requesterName,
   pickupMinutes: z.int().min(1).max(LIMITS.expiresInMinutes).exactOptional(),
   completionMinutes: z
     .int()

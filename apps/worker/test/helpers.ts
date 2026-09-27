@@ -4,6 +4,7 @@ import { createApp, type Services } from "../src/app.ts";
 import { type Config, readSchedule } from "../src/config.ts";
 import type { GitHub, Membership } from "../src/github.ts";
 import { base64url } from "../src/ids.ts";
+import { Machines } from "../src/machines.ts";
 import type { Notifier, Push } from "../src/notify.ts";
 import { Passkeys } from "../src/passkeys.ts";
 import type {
@@ -82,6 +83,7 @@ export function services(now = MONDAY_10AM): TestServices {
   return {
     store: new Store(env.DB),
     accounts,
+    machines: new Machines(env.DB),
     passkeys: new Passkeys(accounts, config),
     github: new FakeGitHub(),
     notifier: new FakeNotifier(),

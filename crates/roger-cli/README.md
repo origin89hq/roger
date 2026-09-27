@@ -8,8 +8,11 @@ cargo install --locked roger-cli
 roger skill    # how an agent should use it
 ```
 
-Save the token from the inbox's Settings to `~/.config/roger/token`, or set
-`ROGER_TOKEN` or `ROGER_TOKEN_FILE`. `roger --help` lists every command and
-the exit codes.
+Run `roger login` once per machine and approve the code in the inbox. Each
+automation then names itself with `--as <name>` or `ROGER_REQUESTER`, and acts
+as the requester `<machine>/<name>`. A requester token from the inbox's
+Settings still works through `ROGER_TOKEN`, `ROGER_TOKEN_FILE`, or
+`~/.config/roger/token`. `roger --help` lists every command and the exit
+codes.
 
 Licensed under either MIT or Apache-2.0, at your option.

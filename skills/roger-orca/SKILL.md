@@ -1,6 +1,6 @@
 ---
 name: roger-orca
-description: Route Orca decisions that need a person through Roger. Use in an Orca coordinator that parks a Task on a human decision, and in the Orca merge gate when it hands a PR to a person, whenever `roger` is installed with a token. Read the core `roger` skill first.
+description: Route Orca decisions that need a person through Roger. Use in an Orca coordinator that parks a Task on a human decision, and in the Orca merge gate when it hands a PR to a person, whenever `roger` is installed and logged in. Read the core `roger` skill first.
 license: MIT OR Apache-2.0
 ---
 
@@ -11,9 +11,13 @@ used to leave a decision in a report or a PR label: the decision also becomes
 a Roger Ask, and the run picks the answer up on a later pass. Orca's own rules
 still decide what may be done; Roger only records who decided.
 
-Use one requester per Orca host and job, such as `orca@studio` for
-coordinators and `orca-merge-gate@studio` for the gate, so their unfinished
-answers stay separate.
+Name each Orca job on every `roger` call, with `--as` or by exporting
+`ROGER_REQUESTER` in the job's environment: `issue-coordinator` for a
+coordinator and `merge-gate` for the gate. Each name is its own requester, such
+as `studio/merge-gate`, so one job never reads, traces, or finishes another
+job's answers. Keep the name stable across runs of the same job. To keep an
+existing requester such as `orca@studio` with its open Asks, run
+`roger adopt orca@studio` once on that machine and use `--as orca@studio`.
 
 ## Coordinator escalations
 

@@ -4,6 +4,7 @@ import { readConfig } from "./config.ts";
 import { runCron } from "./cron.ts";
 import { githubApi } from "./github.ts";
 import { failure } from "./http.ts";
+import { Machines } from "./machines.ts";
 import { ntfy } from "./notify.ts";
 import { Passkeys } from "./passkeys.ts";
 import { Store } from "./store.ts";
@@ -26,6 +27,7 @@ function services(env: Env, ctx: ExecutionContext): Services | null {
   return {
     store: new Store(env.DB),
     accounts,
+    machines: new Machines(env.DB),
     passkeys: new Passkeys(accounts, config),
     github: githubApi(config.github.clientId, config.github.clientSecret),
     notifier: config.ntfy ? ntfy(config.ntfy.url, config.ntfy.token) : null,

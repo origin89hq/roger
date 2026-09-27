@@ -3,14 +3,18 @@
 use std::path::Path;
 use std::time::Duration;
 
-use roger_protocol::{AppendTrace, Ask, AskList, AskState, CreateAsk, ErrorBody};
+use roger_protocol::{
+    AppendTrace, Ask, AskList, AskState, CreateAsk, DEVICE_CLIENT_ID, DEVICE_GRANT_TYPE,
+    DeviceAuthorization, DeviceErrorBody, ErrorBody, MachineToken, REQUESTER_HEADER,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use ureq::http::Response;
 use ureq::{Agent, Body};
 
+use crate::credentials::Credentials;
 use crate::error::{Error, Result};
-use crate::parse::AskId;
+use crate::parse::{AskId, MachineName, RequesterName};
 
 /// Used when `ROGER_URL` is not set.
 pub const DEFAULT_URL: &str = "https://roger.origin89.com";
@@ -47,6 +51,34 @@ fn read_token_file(path: &Path) -> Result<String> {
     })
 }
 
+/// The credential a command authenticates with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Auth {
+    /// A requester token from Settings; always that one requester.
+    Token(String),
+    /// A machine login from `roger login`.
+    Machine(Credentials),
+}
+
+/// Picks the credential: `ROGER_TOKEN`, then the file `ROGER_TOKEN_FILE`
+/// names, then the saved login, then `default_file` when it exists. An
+/// explicitly configured token wins so existing jobs keep their requester.
+///
+/// `saved` is read only when no token is configured, so a damaged login file
+/// does not break a job that names its own token.
+pub fn resolve_auth(
+    token: Option<&str>,
+    token_file: Option<&Path>,
+    saved: impl FnOnce() -> Result<Option<Credentials>>,
+    default_file: Option<&Path>,
+) -> Result<Auth> {
+    let explicit = token.is_some_and(|t| !t.trim().is_empty()) || token_file.is_some();
+    if !explicit && let Some(credentials) = saved()? {
+        return Ok(Auth::Machine(credentials));
+    }
+    resolve_token(token, token_file, default_file).map(Auth::Token)
+}
+
 /// Which Asks `GET /v1/asks` returns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListFilter {
@@ -59,14 +91,21 @@ pub struct ListFilter {
     pub repo: Option<String>,
 }
 
+/// A device token poll that did not return a credential.
+pub type DevicePoll = std::result::Result<MachineToken, DeviceErrorBody>;
+
 pub struct Client {
     agent: Agent,
     base: String,
     authorization: String,
+    /// Sent with a machine credential to name the automation.
+    requester: Option<String>,
 }
 
 impl Client {
-    pub fn new(base: &str, token: &str) -> Self {
+    /// A client for `token`, a requester token or a machine credential. With
+    /// a machine credential, `requester` names the automation it acts for.
+    pub fn new(base: &str, token: &str, requester: Option<&RequesterName>) -> Self {
         let agent: Agent = Agent::config_builder()
             .http_status_as_error(false)
             .timeout_global(Some(REQUEST_TIMEOUT))
@@ -77,6 +116,75 @@ impl Client {
             agent,
             base: base.trim_end_matches('/').to_owned(),
             authorization: format!("Bearer {token}"),
+            requester: requester.map(|name| name.as_str().to_owned()),
+        }
+    }
+
+    /// Starts a device login (RFC 8628). Needs no credential.
+    pub fn device_code(&self, machine: Option<&MachineName>) -> Result<DeviceAuthorization> {
+        let mut form = vec![("client_id", DEVICE_CLIENT_ID)];
+        if let Some(machine) = machine {
+            form.push(("machine", machine.as_str()));
+        }
+        let response = self
+            .agent
+            .post(format!("{}/v1/device/code", self.base))
+            .send_form(form)?;
+        decode(response)
+    }
+
+    /// Polls once for the credential of a device login.
+    pub fn device_token(&self, device_code: &str) -> Result<DevicePoll> {
+        let mut response = self
+            .agent
+            .post(format!("{}/v1/device/token", self.base))
+            .send_form([
+                ("client_id", DEVICE_CLIENT_ID),
+                ("grant_type", DEVICE_GRANT_TYPE),
+                ("device_code", device_code),
+            ])?;
+        let status = response.status();
+        let text = response.body_mut().read_to_string()?;
+        if status.is_success() {
+            return Ok(Ok(serde_json::from_str(&text)?));
+        }
+        match serde_json::from_str::<DeviceErrorBody>(&text) {
+            Ok(body) => Ok(Err(body)),
+            Err(_) => Err(api_error(status.as_u16(), &text)),
+        }
+    }
+
+    /// Revokes this machine credential.
+    pub fn logout(&self) -> Result<()> {
+        let mut response = self
+            .agent
+            .post(format!("{}/v1/machine/logout", self.base))
+            .header("authorization", &self.authorization)
+            .send_empty()?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let text = response.body_mut().read_to_string()?;
+        Err(api_error(status.as_u16(), &text))
+    }
+
+    /// Binds a requester made in Settings to this machine.
+    pub fn adopt(&self, name: &RequesterName) -> Result<serde_json::Value> {
+        self.post(
+            "/v1/machine/adopt",
+            &serde_json::json!({ "name": name.as_str() }),
+        )
+    }
+
+    fn get_request(&self, path: &str) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
+        let request = self
+            .agent
+            .get(format!("{}{path}", self.base))
+            .header("authorization", &self.authorization);
+        match &self.requester {
+            Some(name) => request.header(REQUESTER_HEADER, name),
+            None => request,
         }
     }
 
@@ -85,19 +193,13 @@ impl Client {
     }
 
     pub fn get(&self, id: &AskId) -> Result<Ask> {
-        let response = self
-            .agent
-            .get(format!("{}/v1/asks/{id}", self.base))
-            .header("authorization", &self.authorization)
-            .call()?;
+        let response = self.get_request(&format!("/v1/asks/{id}")).call()?;
         decode(response)
     }
 
     pub fn list_page(&self, filter: &ListFilter, after: Option<&str>) -> Result<AskList> {
         let mut request = self
-            .agent
-            .get(format!("{}/v1/asks", self.base))
-            .header("authorization", &self.authorization)
+            .get_request("/v1/asks")
             .query("state", filter.state.as_str());
         if filter.unfinished {
             request = request.query("terminal", "none");
@@ -124,13 +226,15 @@ impl Client {
 
     fn post<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
         let body = serde_json::to_string(body)?;
-        let response = self
+        let mut request = self
             .agent
             .post(format!("{}{path}", self.base))
             .header("authorization", &self.authorization)
-            .header("content-type", "application/json")
-            .send(body)?;
-        decode(response)
+            .header("content-type", "application/json");
+        if let Some(name) = &self.requester {
+            request = request.header(REQUESTER_HEADER, name);
+        }
+        decode(request.send(body)?)
     }
 }
 
@@ -142,13 +246,17 @@ fn decode<T: DeserializeOwned>(mut response: Response<Body>) -> Result<T> {
     if status.is_success() {
         return Ok(serde_json::from_str(&text)?);
     }
-    match serde_json::from_str::<ErrorBody>(&text) {
-        Ok(body) => Err(Error::Api {
-            status: status.as_u16(),
+    Err(api_error(status.as_u16(), &text))
+}
+
+fn api_error(status: u16, text: &str) -> Error {
+    match serde_json::from_str::<ErrorBody>(text) {
+        Ok(body) => Error::Api {
+            status,
             code: body.error.code,
             message: body.error.message,
-        }),
-        Err(_) => Err(Error::Status(status.as_u16())),
+        },
+        Err(_) => Error::Status(status),
     }
 }
 
@@ -262,7 +370,7 @@ mod tests {
         let created = ask(AskState::Open, None);
         let (base, handle) = stub(vec![(201, serde_json::to_string(&created)?)])?;
         let request = create_ask();
-        let got = Client::new(&format!("{base}/"), "secret").create(&request)?;
+        let got = Client::new(&format!("{base}/"), "secret", None).create(&request)?;
         assert_eq!(got, created);
 
         let received = join(handle)?;
@@ -286,7 +394,7 @@ mod tests {
             r#"{"error":{"code":"conflict","message":"Ask is answered","state":"answered"}}"#;
         let (base, handle) = stub(vec![(409, body.to_owned())])?;
         let id: AskId = "01K6A0000000000000000000AA".parse()?;
-        let got = Client::new(&base, "t").withdraw(&id);
+        let got = Client::new(&base, "t", None).withdraw(&id);
         match got {
             Err(
                 err @ Error::Api {
@@ -313,7 +421,7 @@ mod tests {
     fn non_json_error_reports_the_status() -> TestResult {
         let (base, handle) = stub(vec![(502, "<html>bad gateway</html>".to_owned())])?;
         let id: AskId = "abc".parse()?;
-        let got = Client::new(&base, "t").get(&id);
+        let got = Client::new(&base, "t", None).get(&id);
         assert!(matches!(got, Err(Error::Status(502))), "{got:?}");
         let received = join(handle)?;
         assert_eq!(
@@ -328,7 +436,7 @@ mod tests {
         let (base, handle) = stub(vec![(200, r#"{"id":"x"}"#.to_owned())])?;
         let id: AskId = "x".parse()?;
         assert!(matches!(
-            Client::new(&base, "t").get(&id),
+            Client::new(&base, "t", None).get(&id),
             Err(Error::Decode(_))
         ));
         join(handle)?;
@@ -346,7 +454,7 @@ mod tests {
             (200, serde_json::to_string(&page)?),
             (200, serde_json::to_string(&traced)?),
         ])?;
-        let client = Client::new(&base, "t");
+        let client = Client::new(&base, "t", None);
         let filter = ListFilter {
             state: AskState::Answered,
             unfinished: true,
@@ -410,6 +518,177 @@ mod tests {
             Err(Error::MissingToken)
         ));
         std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    fn saved() -> Credentials {
+        Credentials {
+            url: "https://roger.test".to_owned(),
+            machine: "studio".to_owned(),
+            owner: "someone".to_owned(),
+            credential: "rogm_x".to_owned(),
+        }
+    }
+
+    #[test]
+    fn an_explicit_token_wins_over_the_login_which_wins_over_the_default_file() -> TestResult {
+        let dir = std::env::temp_dir().join(format!("roger-cli-auth-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let default = dir.join("token");
+        std::fs::write(&default, "default-token\n")?;
+        let login = || Ok(Some(saved()));
+        let unread = || -> Result<Option<Credentials>> { Err(Error::NotLoggedIn) };
+
+        assert_eq!(
+            resolve_auth(Some("env"), None, unread, Some(&default))?,
+            Auth::Token("env".to_owned())
+        );
+        assert_eq!(
+            resolve_auth(None, Some(&default), unread, None)?,
+            Auth::Token("default-token".to_owned())
+        );
+        assert_eq!(
+            resolve_auth(Some(" "), None, login, Some(&default))?,
+            Auth::Machine(saved())
+        );
+        assert_eq!(
+            resolve_auth(None, None, || Ok(None), Some(&default))?,
+            Auth::Token("default-token".to_owned())
+        );
+        // A damaged login file is an error, not a silent fallback to another requester.
+        assert!(matches!(
+            resolve_auth(None, None, unread, Some(&default)),
+            Err(Error::NotLoggedIn)
+        ));
+        assert!(matches!(
+            resolve_auth(None, None, || Ok(None), None),
+            Err(Error::MissingToken)
+        ));
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_machine_client_names_its_automation_on_every_call() -> TestResult {
+        let page = AskList {
+            asks: Vec::new(),
+            next: None,
+        };
+        let created = ask(AskState::Open, None);
+        let (base, handle) = stub(vec![
+            (200, serde_json::to_string(&page)?),
+            (201, serde_json::to_string(&created)?),
+        ])?;
+        let name: RequesterName = "merge-gate".parse()?;
+        let client = Client::new(&base, "rogm_x", Some(&name));
+        let filter = ListFilter {
+            state: AskState::Open,
+            unfinished: false,
+            prefix: None,
+            repo: None,
+        };
+        client.list_page(&filter, None)?;
+        client.create(&create_ask())?;
+        let received = join(handle)?;
+        assert_eq!(received.len(), 2);
+        for request in &received {
+            assert_eq!(request.header("roger-requester"), Some("merge-gate"));
+            assert_eq!(request.header("authorization"), Some("Bearer rogm_x"));
+        }
+
+        // A token client sends no name.
+        let (base, handle) = stub(vec![(200, serde_json::to_string(&page)?)])?;
+        Client::new(&base, "roger_x", None).list_page(&filter, None)?;
+        assert_eq!(
+            join(handle)?
+                .first()
+                .and_then(|r| r.header("roger-requester")),
+            None
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn device_endpoints_send_oauth_forms_without_a_credential() -> TestResult {
+        let started = DeviceAuthorization {
+            device_code: "dev".to_owned(),
+            user_code: "BCDF-GHJK".to_owned(),
+            verification_uri: "https://roger.test/#device".to_owned(),
+            verification_uri_complete: "https://roger.test/#device=BCDF-GHJK".to_owned(),
+            expires_in: 900,
+            interval: 5,
+        };
+        let token = MachineToken {
+            access_token: "rogm_x".to_owned(),
+            token_type: "Bearer".to_owned(),
+            machine: "studio".to_owned(),
+            owner: "someone".to_owned(),
+        };
+        let (base, handle) = stub(vec![
+            (200, serde_json::to_string(&started)?),
+            (
+                400,
+                r#"{"error":"authorization_pending","error_description":"wait"}"#.to_owned(),
+            ),
+            (200, serde_json::to_string(&token)?),
+            (
+                503,
+                r#"{"error":{"code":"internal","message":"busy","state":null}}"#.to_owned(),
+            ),
+        ])?;
+        let client = Client::new(&base, "", None);
+        let machine: MachineName = "studio".parse()?;
+        assert_eq!(client.device_code(Some(&machine))?, started);
+        match client.device_token("dev")? {
+            Err(body) => assert_eq!(
+                body.error,
+                roger_protocol::DeviceError::AuthorizationPending
+            ),
+            Ok(other) => return Err(format!("unexpected {other:?}").into()),
+        }
+        assert_eq!(client.device_token("dev")?, Ok(token));
+        assert!(matches!(
+            client.device_token("dev"),
+            Err(Error::Api { status: 503, .. })
+        ));
+        let received = join(handle)?;
+        let [code, poll, ..] = received.as_slice() else {
+            return Err("expected four requests".into());
+        };
+        assert_eq!(code.request_line, "POST /v1/device/code HTTP/1.1");
+        assert_eq!(code.body, "client_id=roger-cli&machine=studio");
+        assert_eq!(
+            code.header("content-type"),
+            Some("application/x-www-form-urlencoded")
+        );
+        assert_eq!(code.header("authorization"), None);
+        assert_eq!(
+            poll.body,
+            "client_id=roger-cli&grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code&device_code=dev"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn logout_treats_an_unknown_login_as_an_api_error() -> TestResult {
+        let (base, handle) = stub(vec![
+            (204, String::new()),
+            (
+                401,
+                r#"{"error":{"code":"unauthorized","message":"revoked","state":null}}"#.to_owned(),
+            ),
+        ])?;
+        let client = Client::new(&base, "rogm_x", None);
+        client.logout()?;
+        assert!(matches!(
+            client.logout(),
+            Err(Error::Api { status: 401, .. })
+        ));
+        let received = join(handle)?;
+        assert_eq!(
+            received.first().map(|r| r.request_line.as_str()),
+            Some("POST /v1/machine/logout HTTP/1.1")
+        );
         Ok(())
     }
 }
