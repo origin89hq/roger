@@ -175,8 +175,26 @@ function repoLink(repo) {
 
 // ---- Lists -----------------------------------------------------------------------
 
-/** @param {Ask} ask @param {Node | null} status */
-function row(ask, status = null) {
+/**
+ * Where the requester is with an answer, from its trace: the last event wins.
+ * @param {Ask} ask
+ * @returns {{ text: string, tone: string } | null}
+ */
+function progress(ask) {
+  if (!ask.answer) return null;
+  const events = ask.trace.map((t) => t.event);
+  if (events.includes("applied")) return { text: "Done", tone: "done" };
+  if (events.includes("failed")) return { text: "Failed", tone: "failed" };
+  if (events.includes("not_applicable"))
+    return { text: "No longer applies", tone: "quiet" };
+  if (events.includes("dispatched") || events.includes("progress"))
+    return { text: "Working", tone: "working" };
+  if (events.includes("delivered")) return { text: "Read", tone: "working" };
+  return { text: "Not read yet", tone: "waiting" };
+}
+
+/** @param {Ask} ask @param {(Node | null)[]} status */
+function row(ask, ...status) {
   return el(
     "button",
     {
@@ -196,7 +214,7 @@ function row(ask, status = null) {
       "span",
       { class: "meta" },
       ...badges(ask),
-      status,
+      ...status,
       el("span", { class: "source" }, ask.repo ?? ask.requester),
     ),
   );
@@ -258,6 +276,10 @@ function renderHistoryList() {
               { class: `badge outcome-${a.answer?.decision ?? a.state}` },
               a.answer ? DECISION_TEXT[a.answer.decision] : STATE_TEXT[a.state],
             ),
+            ((p) =>
+              p
+                ? el("span", { class: `progress progress-${p.tone}` }, p.text)
+                : null)(progress(a)),
           ),
         )
       : [
@@ -307,6 +329,27 @@ function renderEmptyDetail() {
   );
 }
 
+/**
+ * Answered, read, and finished times for the Details list.
+ * @param {Ask} ask
+ * @returns {HTMLElement[]}
+ */
+function lifecycle(ask) {
+  if (!ask.answer) return [];
+  const at = (/** @type {string[]} */ events) =>
+    ask.trace.find((t) => events.includes(t.event))?.at ?? null;
+  const read = at(["delivered"]);
+  const finished = at(["applied", "failed", "not_applicable"]);
+  return [
+    el("dt", {}, "Answered"),
+    el("dd", {}, when(ask.answer.answeredAt)),
+    el("dt", {}, `Read by ${ask.requester}`),
+    el("dd", {}, read === null ? "Not yet" : when(read)),
+    el("dt", {}, "Finished"),
+    el("dd", {}, finished === null ? "Not yet" : when(finished)),
+  ];
+}
+
 /** @param {Ask} ask */
 function renderDetail(ask) {
   const facts = el(
@@ -326,6 +369,7 @@ function renderDetail(ask) {
     ...(ask.expiresAt
       ? [el("dt", {}, "Expires"), el("dd", {}, when(ask.expiresAt))]
       : []),
+    ...lifecycle(ask),
   );
   const action = ask.action
     ? el(
@@ -409,6 +453,18 @@ function renderDetail(ask) {
   pane.closest(".split")?.classList.add("showing");
 }
 
+/**
+ * The answer every Ask accepts: the responder's own message instead of an
+ * option. The Worker records it as an `other` decision, never an approval.
+ * @type {AskOption}
+ */
+const CUSTOM_REPLY = {
+  id: "_custom",
+  label: "Custom reply",
+  decision: "other",
+  inputRequired: true,
+};
+
 /** @param {Ask} ask */
 function answerForm(ask) {
   const needsInput = ask.options.some((o) => o.inputRequired);
@@ -443,6 +499,22 @@ function answerForm(ask) {
       option.inputRequired ? " …" : "",
     );
   });
+  buttons.push(
+    el(
+      "button",
+      {
+        class: "option custom-reply",
+        "data-key": "r",
+        title: "Answer with only the message above; never an approval",
+        onclick: (e) => {
+          const target = /** @type {HTMLButtonElement} */ (e.currentTarget);
+          void submitAnswer(ask, CUSTOM_REPLY, input.value, target);
+        },
+      },
+      el("kbd", {}, "r"),
+      "Send my message instead",
+    ),
+  );
   const hasApprove = ask.options.some((o) => o.decision === "approve");
   return el(
     "section",
@@ -604,7 +676,12 @@ async function select(id) {
 async function submitAnswer(ask, option, text, button) {
   const input = text.trim() || null;
   if (option.inputRequired && !input) {
-    notify(`"${option.label}" needs instructions.`, true);
+    notify(
+      option.id === CUSTOM_REPLY.id
+        ? "Write your message first."
+        : `"${option.label}" needs instructions.`,
+      true,
+    );
     $("answer-input").focus();
     return;
   }
@@ -1069,6 +1146,11 @@ document.addEventListener("keydown", (event) => {
     case "i":
       document.getElementById("answer-input")?.focus();
       event.preventDefault();
+      break;
+    case "r":
+      /** @type {HTMLButtonElement | null} */ (
+        document.querySelector('.options button[data-key="r"]')
+      )?.click();
       break;
     case "g":
       pendingG = true;

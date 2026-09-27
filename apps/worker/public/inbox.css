@@ -443,6 +443,46 @@ nav a[aria-current="page"] {
   border-color: var(--color-alarm);
   color: var(--color-alarm);
 }
+.option.custom-reply {
+  border-style: dashed;
+  color: var(--color-muted);
+}
+.option.custom-reply:hover {
+  color: var(--color-fg);
+}
+.progress {
+  font-size: 12px;
+  white-space: nowrap;
+}
+.progress::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: var(--color-signal);
+  vertical-align: 1px;
+}
+.progress-done {
+  color: var(--color-fg);
+}
+.progress-done::before {
+  background: var(--color-nominal);
+}
+.progress-failed {
+  color: var(--color-alarm);
+}
+.progress-failed::before {
+  background: var(--color-alarm);
+}
+.progress-waiting::before {
+  background: none;
+  border: 1px dashed var(--color-muted);
+}
+.progress-quiet::before {
+  background: var(--color-faint);
+}
 .hint {
   margin: 12px 0 0;
   color: var(--color-faint);

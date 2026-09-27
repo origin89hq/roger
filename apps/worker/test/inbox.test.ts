@@ -204,6 +204,77 @@ describe("answering without a passkey", () => {
   });
 });
 
+describe("custom replies", () => {
+  it("records the responder's own message as an other answer", async () => {
+    const svc = services();
+    const me = await person(svc);
+    const bot = await requester(svc, me);
+    const ask = await createAsk(svc, bot.token, question());
+    const response = await answerAsk(svc, me.cookie, ask.id, {
+      option: "_custom",
+      input: "  Merge the green ones, leave the rest to me.  ",
+    });
+    expect(response.status).toBe(200);
+    expect(await readAsk(svc, bot.token, ask.id)).toMatchObject({
+      state: "answered",
+      answer: {
+        optionId: "_custom",
+        optionLabel: "Custom reply",
+        decision: "other",
+        input: "Merge the green ones, leave the rest to me.",
+        passkey: false,
+      },
+    });
+  });
+
+  it("refuses a custom reply without a message", async () => {
+    const svc = services();
+    const me = await person(svc);
+    const bot = await requester(svc, me);
+    const ask = await createAsk(svc, bot.token, question());
+    for (const input of [undefined, "", "   "]) {
+      const response = await answerAsk(svc, me.cookie, ask.id, {
+        option: "_custom",
+        ...(input === undefined ? {} : { input }),
+      });
+      expect(response.status, String(input)).toBe(400);
+    }
+    expect((await readAsk(svc, bot.token, ask.id)).state).toBe("open");
+  });
+
+  it("answers an approval without a passkey and never as an approval", async () => {
+    const svc = services();
+    const me = await person(svc);
+    const bot = await requester(svc, me);
+    const ask = await createAsk(svc, bot.token);
+    const response = await answerAsk(svc, me.cookie, ask.id, {
+      option: "_custom",
+      input: "Split the migration into its own PR first.",
+      rev: REV,
+    });
+    expect(response.status).toBe(200);
+    expect((await response.json<Ask>()).answer).toMatchObject({
+      optionId: "_custom",
+      decision: "other",
+      passkey: false,
+    });
+  });
+
+  it("still requires the revision the approval is bound to", async () => {
+    const svc = services();
+    const me = await person(svc);
+    const bot = await requester(svc, me);
+    const ask = await createAsk(svc, bot.token);
+    const response = await answerAsk(svc, me.cookie, ask.id, {
+      option: "_custom",
+      input: "Hold this.",
+      rev: "0".repeat(40),
+    });
+    expect(response.status).toBe(409);
+    expect((await readAsk(svc, bot.token, ask.id)).state).toBe("open");
+  });
+});
+
 describe("approving", () => {
   async function setup() {
     const svc = services();
