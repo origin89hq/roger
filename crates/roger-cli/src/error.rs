@@ -31,7 +31,10 @@ pub enum Error {
     LoginDenied,
     #[error("could not tell this host's name; pass --machine <name>")]
     NoMachineName,
-    #[error("refusing to send a GitHub login to {0}; ROGER_URL must use https")]
+    #[error(
+        "refusing to send a GitHub login to {0}; ROGER_URL must use https, or http to this \
+         computer, and carry no user name or password"
+    )]
     InsecureLoginUrl(String),
     #[error("the login code expired before it was approved; run `roger login` again")]
     LoginExpired,
