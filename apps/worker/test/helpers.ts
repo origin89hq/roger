@@ -57,6 +57,13 @@ export class FakeGitHub implements GitHub {
     if (this.outage) return "unavailable";
     return this.members.has(login) ? "active" : "none";
   }
+  /** Tokens revoked, in order. A revoked token no longer identifies anyone. */
+  revoked: string[] = [];
+  async revoke(token: string) {
+    this.revoked.push(token);
+    this.users.delete(token);
+    return true;
+  }
 }
 
 export class FakeNotifier implements Notifier {
@@ -68,7 +75,7 @@ export class FakeNotifier implements Notifier {
   }
 }
 
-/** Counts device logins per IP, like the Workers Rate Limiting binding. */
+/** Counts logins per IP, like the Workers Rate Limiting binding. */
 export class FakeLimiter {
   counts = new Map<string, number>();
   limit = 10;
@@ -95,7 +102,7 @@ export function services(now = MONDAY_10AM): TestServices {
   const limiter = new FakeLimiter();
   return {
     limiter,
-    deviceLimit: (ip) => limiter.admit(ip),
+    loginLimit: (ip) => limiter.admit(ip),
     store: new Store(env.DB),
     accounts,
     machines: new Machines(env.DB),

@@ -78,6 +78,12 @@ fn run(cli: Cli) -> Result<u8> {
             None => Ok(None),
         },
         config_file("token").as_deref(),
+        |path| {
+            eprintln!(
+                "roger: {} is empty, so this machine's login is used",
+                path.display()
+            );
+        },
     )?;
     let client = match auth {
         Auth::Token(token) => {

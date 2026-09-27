@@ -4,8 +4,8 @@
   "type": "module",
   "scripts": {
     "dev": "node scripts/brand.mjs && wrangler dev --port 8792 --local-upstream localhost:8792",
-    "typecheck": "wrangler types && tsc --noEmit && tsc --noEmit -p public && tsc --noEmit -p test-dom",
-    "test": "vitest run && vitest run -c vitest.dom.config.ts",
+    "typecheck": "wrangler types && tsc --noEmit && tsc --noEmit -p public",
+    "test": "vitest run",
     "build": "node scripts/brand.mjs && wrangler deploy --dry-run --outdir dist"
   },
   "license": "MIT OR Apache-2.0",
@@ -17,7 +17,6 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.22.0",
     "@origin89/brand": "0.6.0",
-    "happy-dom": "20.14.5",
     "typescript": "7.0.2",
     "vitest": "4.1.11",
     "wrangler": "4.141.0"

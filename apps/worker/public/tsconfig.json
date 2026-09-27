@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "types": []
   },
-  "include": ["inbox.js", "device.js"]
+  "include": ["inbox.js"]
 }

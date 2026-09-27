@@ -81,6 +81,32 @@ pub fn remove(path: &Path) -> Result<()> {
     }
 }
 
+/// Renames a damaged credentials file to `credentials.corrupt-<unix seconds>`,
+/// readable only by this user, and returns the new path.
+pub fn set_aside(path: &Path) -> Result<PathBuf> {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    let mut name = path.file_name().unwrap_or_default().to_owned();
+    name.push(format!(".corrupt-{seconds}"));
+    let aside = path.with_file_name(name);
+    std::fs::rename(path, &aside).map_err(file_error("moving aside", path))?;
+    restrict(&aside).map_err(file_error("restricting", &aside))?;
+    Ok(aside)
+}
+
+#[cfg(unix)]
+fn restrict(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn restrict(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 #[cfg(unix)]
 fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
@@ -178,6 +204,36 @@ mod tests {
             std::fs::metadata(&path)?.permissions().mode() & 0o777,
             0o600
         );
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_damaged_file_is_set_aside_privately() -> TestResult {
+        let dir = temp_dir("aside");
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("credentials");
+        std::fs::write(&path, "not json")?;
+        let aside = set_aside(&path)?;
+        assert!(!path.exists());
+        let name = aside
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        assert!(name.starts_with("credentials.corrupt-"), "{name}");
+        assert_eq!(std::fs::read_to_string(&aside)?, "not json");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&aside)?.permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert!(matches!(
+            set_aside(&path),
+            Err(Error::CredentialsFile { .. })
+        ));
         std::fs::remove_dir_all(&dir)?;
         Ok(())
     }

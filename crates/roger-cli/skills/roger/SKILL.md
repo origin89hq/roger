@@ -24,8 +24,8 @@ Exit 0 means the binary and login work. Otherwise, stop and report; do not
 fall back to guessing the answer.
 
 - Install or update with `cargo install --locked roger-cli`.
-- Each machine logs in once: a person runs `roger login`, approves the code
-  it prints in the inbox, and the login is saved to
+- Each machine logs in once: a person runs `roger login`, enters the code it
+  prints on GitHub, and the login is saved to
   `~/.config/roger/credentials`. Do not run `roger login` or `roger logout`
   unless the person asks; login needs them at the browser.
 - Name your automation on every call with `--as <name>` or

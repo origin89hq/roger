@@ -184,49 +184,6 @@ export type Decision =
 /**  Anything else, such as "fix" with instructions. */
 "other";
 
-/**  Response of `POST /v1/device/code` (RFC 8628, section 3.2). */
-export type DeviceAuthorization = {
-	/**  Secret the CLI polls with. Never shown to the person. */
-	device_code: string,
-	/**  Code the person confirms in the inbox, such as `BCDF-GHJK`. */
-	user_code: string,
-	/**  Where the person enters the code. */
-	verification_uri: string,
-	/**  `verification_uri` with the code filled in. */
-	verification_uri_complete: string,
-	/**  Seconds until both codes expire. */
-	expires_in: number,
-	/**  Seconds the CLI waits between polls. */
-	interval: number,
-};
-
-/**  Error of the device token endpoint (RFC 8628, section 3.5, and RFC 6749). */
-export type DeviceError = 
-/**  The person has not approved or denied yet. Poll again. */
-"authorization_pending" | 
-/**  Polled too fast. Add 5 seconds to the interval and poll again. */
-"slow_down" | 
-/**  The person denied the request. */
-"access_denied" | 
-/**  The device code expired. Start over. */
-"expired_token" | 
-/**  Unknown or already used device code. */
-"invalid_grant" | 
-/**  A parameter is missing or malformed. */
-"invalid_request" | 
-/**  The client is not the Roger CLI. */
-"invalid_client" | 
-/**  The grant type is not the device code grant. */
-"unsupported_grant_type";
-
-/**  Error body of the device endpoints, in the OAuth form (RFC 6749, section 5.2). */
-export type DeviceErrorBody = {
-	/**  What went wrong. */
-	error: DeviceError,
-	/**  Human-readable explanation. */
-	error_description: string,
-};
-
 /**  Body of every error response. */
 export type ErrorBody = {
 	/**  What went wrong. */
@@ -287,15 +244,32 @@ export type Link = {
 	url: string,
 };
 
-/**  Successful response of `POST /v1/device/token` (RFC 8628, section 3.5). */
+/**  Response of `GET /v1/login`: how `roger login` signs in with GitHub. */
+export type LoginConfig = {
+	/**  The deployment's GitHub OAuth app, for GitHub's device flow. */
+	githubClientId: string,
+	/**  OAuth scopes to request; the Worker needs them to check membership. */
+	scope: string,
+};
+
+/**  Body of `POST /v1/login`. */
+export type MachineLogin = {
+	/**
+	 *  A GitHub token from the device flow. The Worker checks who it belongs
+	 *  to, revokes it, and never stores it.
+	 */
+	githubToken: string,
+	/**  The machine name, such as `studio`. */
+	machine: string,
+};
+
+/**  Response of `POST /v1/login`. */
 export type MachineToken = {
 	/**  The machine credential. Shown once; the Worker stores only its hash. */
-	access_token: string,
-	/**  Always `Bearer`. */
-	token_type: string,
-	/**  The machine name the person chose when approving. */
+	credential: string,
+	/**  The machine name. */
 	machine: string,
-	/**  GitHub login of the person who approved, who owns the machine. */
+	/**  GitHub login of the person who logged in, who owns the machine. */
 	owner: string,
 };
 

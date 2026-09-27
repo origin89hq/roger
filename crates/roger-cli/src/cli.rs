@@ -13,11 +13,11 @@ use crate::parse::{
 const LONG_ABOUT: &str = "\
 Ask a person for a decision and read the answer back.
 
-Log in once per machine with `roger login`; the person approves it in the
-inbox. Each automation then names itself with --as, and Roger resolves it to
-the requester <machine>/<name>, created on first use. Without a name, calls
-act as <machine>/default. Any process that can read this machine's login can
-act as any of its requesters.
+Log in once per machine with `roger login`, which signs in with GitHub.
+Each automation then names itself with --as, and Roger resolves it to the
+requester <machine>/<name>, created on first use. Without a name, calls act
+as <machine>/default. Any process that can read this machine's login can act
+as any of its requesters.
 
 Configuration comes from the environment:
   ROGER_REQUESTER    automation name, used when --as is not given
@@ -56,12 +56,11 @@ pub struct Cli {
 pub enum Command {
     #[command(flatten)]
     Api(ApiCommand),
-    /// Log this machine in: a person approves it in the inbox, and the
-    /// credential is saved to ~/.config/roger/credentials. Replaces an
-    /// earlier login of this machine.
+    /// Log this machine in with GitHub's device flow; the machine credential
+    /// is saved to ~/.config/roger/credentials. Replaces an earlier login of
+    /// this machine.
     Login {
-        /// Suggested machine name; the person can change it when approving.
-        /// Default: this host's name.
+        /// Machine name, such as `studio`. Default: this host's name.
         #[arg(long)]
         machine: Option<MachineName>,
     },

@@ -32,15 +32,19 @@ Install the CLI with `cargo install --locked roger-cli`; rerunning it updates
 to the latest release. Then log the machine in once:
 
 ```sh
-roger login                      # prints a code; approve it in the inbox
+roger login                      # prints a code; enter it on github.com
 roger ask --as merge-gate ...    # or export ROGER_REQUESTER=merge-gate
 ```
 
-`roger login` uses device authorization (RFC 8628): the person types the code
-into the inbox, checks where the login came from, and names the machine, such
-as `studio`. A machine name belongs to one person while it is logged in. The CLI saves the
+`roger login` signs in with GitHub's device flow, using the same OAuth app as
+the inbox (device flow must be enabled on it). The person enters the code on
+github.com. The CLI then sends the GitHub token once to the Worker, which runs
+the same checks as inbox sign-in (who the person is and membership of
+`GITHUB_TEAM`), revokes the GitHub token, and returns a machine credential. The
+machine is named with `--machine`, defaulting to the host name, such as
+`studio`; a name belongs to one person while it is logged in. The CLI saves the
 machine credential to `~/.config/roger/credentials` with mode 0600; the Worker
-stores only its hash. Each automation names itself with `--as <name>` or
+stores only its hash, and no GitHub token is kept anywhere. Each automation names itself with `--as <name>` or
 `ROGER_REQUESTER`, and Roger resolves it to the requester `<machine>/<name>`,
 created on first use. A call without a name acts as `<machine>/default`.
 Asks, idempotency keys, decision keys, and `list` stay per requester, so jobs
@@ -58,8 +62,8 @@ precedence over the login: `ROGER_TOKEN`, then `ROGER_TOKEN_FILE`, then
 the machine in Settings, so `--as <name>` there keeps its Asks, and remove the
 token from the job. `ROGER_URL` defaults to `https://roger.origin89.com`.
 
-The Worker admits 10 login starts per minute per client IP, through the
-`DEVICE_LOGINS` rate-limit binding in `wrangler.jsonc`; without the binding it
+The Worker admits 10 logins per minute per client IP, through the `LOGINS`
+rate-limit binding in `wrangler.jsonc`; without the binding it
 refuses every login. Machines behind one NAT share that limit, so log them in
 one at a time.
 

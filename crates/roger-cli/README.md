@@ -8,7 +8,7 @@ cargo install --locked roger-cli
 roger skill    # how an agent should use it
 ```
 
-Run `roger login` once per machine and approve the code in the inbox. Each
+Run `roger login` once per machine and enter the code it prints on GitHub. Each
 automation then names itself with `--as <name>` or `ROGER_REQUESTER`, and acts
 as the requester `<machine>/<name>`. A requester token from the inbox's
 Settings still works through `ROGER_TOKEN`, `ROGER_TOKEN_FILE`, or

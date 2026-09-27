@@ -5,8 +5,8 @@ use std::path::Path;
 use std::process::{Command as Process, Stdio};
 
 use roger_protocol::{
-    Action, AppendTrace, Ask, AskList, AskOption, AskState, CreateAsk, Decision, Kind, Outcome,
-    Resume, TraceEvent,
+    Action, AppendTrace, Ask, AskList, AskOption, AskState, CreateAsk, Decision, Kind,
+    MachineLogin, Outcome, Resume, TraceEvent,
 };
 use serde::Serialize;
 
@@ -14,6 +14,7 @@ use crate::cli::{ApiCommand, AskArgs, ListArgs, ListFormat, TraceArgs};
 use crate::client::{Client, ListFilter};
 use crate::credentials::{self, Credentials};
 use crate::error::{Error, Result};
+use crate::login::{GITHUB_URL, GitHub, wait_for_token};
 use crate::parse::{MachineName, github_repo_from_remote, refs_to_map, whole_minutes};
 use crate::wait::{SystemClock, wait};
 
@@ -96,33 +97,51 @@ pub fn run(client: &Client, command: ApiCommand) -> Result<u8> {
     }
 }
 
-/// `roger login`: runs device authorization, saves the new credential, and
-/// only then revokes the login it replaces, so a denied or expired login
-/// leaves the old one working.
+/// `roger login`: signs in with GitHub's device flow, exchanges that token
+/// once for a machine credential, saves it, and only then revokes the login
+/// it replaces, so a failed login leaves the old one working. A damaged
+/// credentials file is set aside instead of blocking the login.
 pub fn login(
     base: &str,
     path: &Path,
     token_file: Option<&Path>,
     machine: Option<MachineName>,
 ) -> Result<u8> {
-    let old = credentials::load(path)?;
-    // The device endpoints take no credential.
-    let client = Client::new(base, "", None);
-    let suggested = machine.or_else(host_machine_name);
-    let started = client.device_code(suggested.as_ref())?;
-    let token = crate::login::login(
+    let old = match credentials::load(path) {
+        Ok(old) => old,
+        Err(err) => {
+            let aside = credentials::set_aside(path)?;
+            eprintln!(
+                "roger: {err}; moved it to {} and continuing without it",
+                aside.display()
+            );
+            None
+        }
+    };
+    let machine = machine
+        .or_else(host_machine_name)
+        .ok_or(Error::NoMachineName)?;
+    let roger = Client::anonymous(base);
+    let config = roger.login_config()?;
+    let github = GitHub::new(GITHUB_URL);
+    let started = github.device_code(&config.github_client_id, &config.scope)?;
+    let github_token = wait_for_token(
         &started,
-        |code| client.device_token(code),
+        |code| github.poll(&config.github_client_id, code),
         &mut SystemClock,
         &mut std::io::stderr(),
     )?;
+    let token = roger.exchange(&MachineLogin {
+        github_token,
+        machine: machine.as_str().to_owned(),
+    })?;
     credentials::save(
         path,
         &Credentials {
             url: base.to_owned(),
             machine: token.machine.clone(),
             owner: token.owner.clone(),
-            credential: token.access_token,
+            credential: token.credential,
         },
     )?;
     // Under the same name the Worker already revoked it; this covers a new name.

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { ULID_PATTERN } from "./ids.ts";
-import type { AppendTrace, CreateAsk } from "./protocol.gen.ts";
+import type { AppendTrace, CreateAsk, MachineLogin } from "./protocol.gen.ts";
 
 /** Content limits. The API enforces them; the CLI and inbox rely on its errors. */
 export const LIMITS = {
@@ -232,23 +232,26 @@ export const machineName = z
     "must be a short lowercase name of letters, digits, and dashes",
   );
 
-/** A user code as the person types it; normalized before lookup. */
-const userCode = z.string().min(1).max(20);
-
-export const deviceLookup = z.strictObject({ userCode });
-export const deviceApproval = z.strictObject({
-  userCode,
+export const machineLogin = z.strictObject({
+  githubToken: z.string().min(1).max(512),
   machine: machineName,
 });
+
 export const machineRef = z.strictObject({
   machineId: z.string().regex(ULID_PATTERN, "must be a machine id"),
 });
 /** A requester name from a previous page, including renamed ones. */
 export const requesterCursor = z.strictObject({
-  after: z.string().min(1).max(300).optional(),
+  // Empty means the first page, as absent does.
+  after: z.string().max(300).optional(),
 });
 export const machineCursor = z.strictObject({
-  after: z.string().regex(ULID_PATTERN, "must be a machine id").optional(),
+  after: z
+    .union([
+      z.literal(""),
+      z.string().regex(ULID_PATTERN, "must be a machine id"),
+    ])
+    .optional(),
 });
 
 export const newRequester = z.strictObject({
@@ -291,5 +294,10 @@ const appendTraceMatchesProtocol: Equals<
   z.output<typeof appendTrace>,
   AppendTrace
 > = true;
+const machineLoginMatchesProtocol: Equals<
+  z.output<typeof machineLogin>,
+  MachineLogin
+> = true;
 void createAskMatchesProtocol;
+void machineLoginMatchesProtocol;
 void appendTraceMatchesProtocol;

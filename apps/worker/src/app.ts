@@ -10,26 +10,17 @@ import {
 import type { Config } from "./config.ts";
 import { evidenceProblem } from "./evidence.ts";
 import type { GitHub } from "./github.ts";
-import { failure, formBody, json, jsonBody } from "./http.ts";
+import { failure, json, jsonBody } from "./http.ts";
 import { canonicalJson, secret, sha256 } from "./ids.ts";
-import {
-  DEFAULT_AUTOMATION,
-  DEVICE_CODE_MS,
-  type Machine,
-  type Machines,
-  normalizeUserCode,
-  POLL_INTERVAL_MS,
-} from "./machines.ts";
+import { DEFAULT_AUTOMATION, type Machine, type Machines } from "./machines.ts";
 import { askPush, type Notifier, passkeyAddedPush } from "./notify.ts";
 import type { Passkeys } from "./passkeys.ts";
 import type {
   Ask,
   AskList,
   AskOption,
-  DeviceAuthorization,
-  DeviceError,
-  DeviceErrorBody,
   EventList,
+  LoginConfig,
   MachineToken,
 } from "./protocol.gen.ts";
 import {
@@ -40,12 +31,10 @@ import {
   askId,
   createAsk,
   describeIssues,
-  deviceApproval,
-  deviceLookup,
   LIMITS,
   listFilter,
   machineCursor,
-  machineName,
+  machineLogin,
   machineRef,
   newRequester,
   notificationSettings,
@@ -59,10 +48,10 @@ export interface Services {
   accounts: Accounts;
   machines: Machines;
   /**
-   * Admits one device login from `ip`, such as a Workers Rate Limiting
+   * Admits one `roger login` from `ip`, such as a Workers Rate Limiting
    * binding. `null` when not configured, which refuses every login.
    */
-  deviceLimit: ((ip: string) => Promise<boolean>) | null;
+  loginLimit: ((ip: string) => Promise<boolean>) | null;
   passkeys: Passkeys;
   github: GitHub;
   /** `null` when pushes are disabled. */
@@ -82,9 +71,8 @@ const OAUTH_COOKIE = "__Host-roger-oauth";
 const INBOX_LIMIT = 200;
 const HISTORY_LIMIT = 50;
 const REQUESTER_PAGE = 100;
-/** The CLI sends this with `roger login`, and any OAuth client can send it. */
-const DEVICE_CLIENT_ID = "roger-cli";
-const DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code";
+/** What `roger login` asks GitHub for: enough to check team membership. */
+const LOGIN_SCOPE = "read:org";
 /** Names the automation a machine credential acts for. */
 const REQUESTER_HEADER = "roger-requester";
 const CREDENTIAL = /^Bearer ((?:roger|rogm)_[A-Za-z0-9_-]{43})$/;
@@ -268,124 +256,85 @@ export function createApp(svc: Services): Hono<Env> {
     return c.body(null, 204);
   });
 
-  // ---- Device authorization (RFC 8628): no credentials ---------------------
+  // ---- Machine login: `roger login` -----------------------------------------
 
-  function deviceError(error: DeviceError, description: string): Response {
-    const body: DeviceErrorBody = { error, error_description: description };
-    return json(body, error === "invalid_client" ? 401 : 400);
-  }
+  // What the CLI needs for GitHub's device flow.
+  agent.get("/login", () =>
+    json({
+      githubClientId: svc.config.github.clientId,
+      scope: LOGIN_SCOPE,
+    } satisfies LoginConfig),
+  );
 
-  agent.post("/device/code", async (c) => {
-    const form = await formBody(c.req.raw, LIMITS.adminBytes);
-    if (!form)
-      return deviceError(
-        "invalid_request",
-        "Send a form body of at most 4 KiB.",
-      );
-    if (form.get("client_id") !== DEVICE_CLIENT_ID)
-      return deviceError(
-        "invalid_client",
-        `client_id must be ${DEVICE_CLIENT_ID}.`,
-      );
-    const suggested = form.get("machine");
-    if (suggested !== null && !machineName.safeParse(suggested).success)
-      return deviceError(
-        "invalid_request",
-        "machine must be a short lowercase name of letters, digits, and dashes.",
-      );
-    // Per source, before anything is stored. A deployment without the
-    // limiter refuses logins rather than running unlimited.
+  /**
+   * Exchanges a GitHub token from the device flow for a machine credential.
+   * The same checks as signing in to the inbox, then the GitHub token is
+   * revoked and never stored.
+   */
+  agent.post("/login", async (c) => {
+    // Per source, before GitHub is called. A deployment without the limiter
+    // refuses logins rather than running unlimited.
     const ip = c.req.header("cf-connecting-ip") ?? "unknown";
-    const allowed = svc.deviceLimit ? await svc.deviceLimit(ip) : false;
+    const allowed = svc.loginLimit ? await svc.loginLimit(ip) : false;
     if (!allowed)
       return failure(
         429,
         "too_many_requests",
-        svc.deviceLimit
+        svc.loginLimit
           ? "Too many logins from this address. Wait a minute and try again."
           : "Logins are not configured on this deployment.",
       );
-    const country = (c.req.raw as { cf?: { country?: unknown } }).cf?.country;
-    const started = await svc.machines.start(
-      suggested,
-      {
-        source: typeof country === "string" ? `${ip} (${country})` : ip,
-        userAgent: c.req.header("user-agent")?.slice(0, 200) ?? null,
-      },
-      svc.now(),
-    );
-    if (!started)
-      return failure(
-        503,
-        "internal",
-        "Too many logins are waiting for approval. Try again later.",
+    const body = await parse(c.req.raw, LIMITS.adminBytes, machineLogin);
+    if (!body.ok) return body.response;
+    const { githubToken, machine } = body.value;
+    try {
+      const user = await svc.github.user(githubToken);
+      if (!user)
+        return failure(401, "unauthorized", "GitHub did not accept the login.");
+      const { org, team } = svc.config.github;
+      const membership = await svc.github.teamMembership(
+        githubToken,
+        org,
+        team,
+        user.login,
       );
-    const verify = `${svc.config.origin}/#device`;
-    return json({
-      device_code: started.deviceCode,
-      user_code: started.userCode,
-      verification_uri: verify,
-      verification_uri_complete: `${verify}=${started.userCode}`,
-      expires_in: DEVICE_CODE_MS / 1000,
-      interval: POLL_INTERVAL_MS / 1000,
-    } satisfies DeviceAuthorization);
-  });
-
-  agent.post("/device/token", async (c) => {
-    const form = await formBody(c.req.raw, LIMITS.adminBytes);
-    if (!form)
-      return deviceError(
-        "invalid_request",
-        "Send a form body of at most 4 KiB.",
-      );
-    if (form.get("client_id") !== DEVICE_CLIENT_ID)
-      return deviceError(
-        "invalid_client",
-        `client_id must be ${DEVICE_CLIENT_ID}.`,
-      );
-    if (form.get("grant_type") !== DEVICE_GRANT_TYPE)
-      return deviceError(
-        "unsupported_grant_type",
-        `grant_type must be ${DEVICE_GRANT_TYPE}.`,
-      );
-    const deviceCode = form.get("device_code");
-    if (!deviceCode || deviceCode.length > 64)
-      return deviceError("invalid_request", "device_code is required.");
-    const result = await svc.machines.poll(deviceCode, svc.now());
-    switch (result.kind) {
-      case "pending":
-        return deviceError(
-          "authorization_pending",
-          "Waiting for approval in the inbox.",
-        );
-      case "slow_down":
-        return deviceError(
-          "slow_down",
-          `Polling too fast; wait ${POLL_INTERVAL_MS / 1000} seconds longer.`,
-        );
-      case "denied":
-        return deviceError(
-          "access_denied",
-          "The login was denied in the inbox.",
-        );
-      case "expired":
-        return deviceError(
-          "expired_token",
-          "The login code expired. Run roger login again.",
-        );
-      case "invalid":
-        return deviceError("invalid_grant", result.message);
-      case "issued":
-        return json({
-          access_token: result.credential,
-          token_type: "Bearer",
-          machine: result.machine,
-          owner: result.owner,
-        } satisfies MachineToken);
-      default: {
-        const unreachable: never = result;
-        throw new Error(`unknown poll result ${String(unreachable)}`);
+      switch (membership) {
+        case "active":
+          break;
+        case "none":
+          return failure(
+            403,
+            "forbidden",
+            `Roger is limited to members of ${org}/${team}.`,
+          );
+        case "unavailable":
+          return failure(503, "internal", "GitHub did not answer. Try again.");
+        default: {
+          const unreachable: never = membership;
+          throw new Error(`unknown membership ${String(unreachable)}`);
+        }
       }
+      const now = svc.now();
+      await svc.accounts.upsertResponder(user, now);
+      const issued = await svc.machines.issue(user.githubId, machine, now);
+      switch (issued.kind) {
+        case "issued":
+          return json({
+            credential: issued.credential,
+            machine,
+            owner: user.login,
+          } satisfies MachineToken);
+        case "name_taken":
+          return failure(409, "conflict", issued.message);
+        default: {
+          const unreachable: never = issued;
+          throw new Error(`unknown issue result ${String(unreachable)}`);
+        }
+      }
+    } finally {
+      // Whatever happened, the GitHub token is not needed again.
+      if (!(await svc.github.revoke(githubToken)))
+        console.warn({ event: "github_revoke_failed" });
     }
   });
 
@@ -781,7 +730,7 @@ export function createApp(svc: Services): Hono<Env> {
       await svc.accounts.requesters(
         c.get("responder").githubId,
         REQUESTER_PAGE,
-        query.data.after ?? null,
+        query.data.after || null,
       ),
     );
   });
@@ -832,77 +781,6 @@ export function createApp(svc: Services): Hono<Env> {
       : failure(404, "not_found", "No active token of yours has that id."),
   );
 
-  // Device logins and machines. User codes travel in bodies, never in URLs,
-  // so request logs never hold one. Each lookup, approval, and denial counts
-  // toward a per-person limit, so codes cannot be guessed.
-  // Matches `/device` itself as well.
-  inbox.use("/device/*", deviceAttempt);
-  async function deviceAttempt(c: Context<Env>, next: () => Promise<void>) {
-    if (!(await svc.machines.attempt(c.get("responder").githubId, svc.now())))
-      return failure(
-        429,
-        "too_many_requests",
-        "Too many login codes tried. Wait 15 minutes and try again.",
-      );
-    await next();
-  }
-
-  inbox.post("/device", async (c) => {
-    const body = await parse(c.req.raw, LIMITS.adminBytes, deviceLookup);
-    if (!body.ok) return body.response;
-    const pending = await svc.machines.pending(body.value.userCode, svc.now());
-    return pending
-      ? json({ userCode: normalizeUserCode(body.value.userCode), ...pending })
-      : failure(
-          404,
-          "not_found",
-          "No login is waiting for that code. It may have expired.",
-        );
-  });
-
-  inbox.post("/device/approve", async (c) => {
-    const body = await parse(c.req.raw, LIMITS.adminBytes, deviceApproval);
-    if (!body.ok) return body.response;
-    const result = await svc.machines.approve(
-      body.value.userCode,
-      c.get("responder").githubId,
-      body.value.machine,
-      svc.now(),
-    );
-    switch (result.kind) {
-      case "approved":
-        return c.body(null, 204);
-      case "not_found":
-        return failure(
-          404,
-          "not_found",
-          "No login is waiting for that code. It may have expired.",
-        );
-      case "name_taken":
-        return failure(409, "conflict", result.message);
-      default: {
-        const unreachable: never = result;
-        throw new Error(`unknown approval ${String(unreachable)}`);
-      }
-    }
-  });
-
-  inbox.post("/device/deny", async (c) => {
-    const body = await parse(c.req.raw, LIMITS.adminBytes, deviceLookup);
-    if (!body.ok) return body.response;
-    return (await svc.machines.deny(
-      body.value.userCode,
-      c.get("responder").githubId,
-      svc.now(),
-    ))
-      ? c.body(null, 204)
-      : failure(
-          404,
-          "not_found",
-          "No login is waiting for that code. It may have expired.",
-        );
-  });
-
   inbox.get("/machines", async (c) => {
     const query = machineCursor.safeParse(c.req.query());
     if (!query.success)
@@ -910,7 +788,7 @@ export function createApp(svc: Services): Hono<Env> {
     return json(
       await svc.machines.list(
         c.get("responder").githubId,
-        query.data.after ?? null,
+        query.data.after || null,
       ),
     );
   });

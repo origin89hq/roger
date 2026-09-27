@@ -16,6 +16,11 @@ export interface GitHub {
     team: string,
     login: string,
   ): Promise<Membership>;
+  /**
+   * Revokes an access token this app issued, so one handed over by
+   * `roger login` cannot be used again. `false` if GitHub did not confirm.
+   */
+  revoke(token: string): Promise<boolean>;
 }
 
 export type Membership = "active" | "none" | "unavailable";
@@ -75,6 +80,28 @@ export function githubApi(clientId: string, clientSecret: string): GitHub {
       )
         return { githubId: Number(body.id), login: body.login };
       return null;
+    },
+    async revoke(token) {
+      try {
+        const response = await fetch(
+          `https://api.github.com/applications/${encodeURIComponent(clientId)}/token`,
+          {
+            method: "DELETE",
+            headers: {
+              accept: "application/vnd.github+json",
+              authorization: `Basic ${btoa(`${clientId}:${clientSecret}`)}`,
+              "content-type": "application/json",
+              "user-agent": "roger",
+              "x-github-api-version": "2022-11-28",
+            },
+            body: JSON.stringify({ access_token: token }),
+            signal: AbortSignal.timeout(TIMEOUT_MS),
+          },
+        );
+        return response.status === 204;
+      } catch {
+        return false;
+      }
     },
     async teamMembership(token, org, team, login) {
       let response: Response;

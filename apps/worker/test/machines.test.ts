@@ -1,19 +1,11 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { deviceApproval } from "../public/device.js";
 import { sha256 } from "../src/ids.ts";
-import {
-  DEVICE_ATTEMPT_WINDOW_MS,
-  DEVICE_ATTEMPTS,
-  MACHINE_PAGE,
-  MACHINE_REQUESTER_LIMIT,
-  Machines,
-} from "../src/machines.ts";
+import { MACHINE_PAGE, MACHINE_REQUESTER_LIMIT } from "../src/machines.ts";
 import type {
   Ask,
   AskList,
-  DeviceAuthorization,
-  DeviceErrorBody,
+  LoginConfig,
   MachineToken,
 } from "../src/protocol.gen.ts";
 import {
@@ -23,86 +15,54 @@ import {
   count,
   createAsk,
   errorOf,
-  minutes,
-  ORIGIN,
   person,
   question,
   requester,
-  send,
   services,
   type TestServices,
 } from "./helpers.ts";
-
-const GRANT = "urn:ietf:params:oauth:grant-type:device_code";
-
-function form(
-  svc: TestServices,
-  path: string,
-  fields: Record<string, string>,
-  headers: Record<string, string> = {},
-): Promise<Response> {
-  return send(
-    svc,
-    new Request(`${ORIGIN}${path}`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/x-www-form-urlencoded",
-        ...headers,
-      },
-      body: new URLSearchParams(fields).toString(),
-    }),
-  );
-}
-
-async function start(
-  svc: TestServices,
-  machine: string | null = "studio",
-): Promise<DeviceAuthorization> {
-  const fields: Record<string, string> = { client_id: "roger-cli" };
-  if (machine) fields.machine = machine;
-  const response = await form(svc, "/v1/device/code", fields);
-  expect(response.status).toBe(200);
-  return response.json<DeviceAuthorization>();
-}
-
-function poll(svc: TestServices, deviceCode: string): Promise<Response> {
-  return form(svc, "/v1/device/token", {
-    client_id: "roger-cli",
-    grant_type: GRANT,
-    device_code: deviceCode,
-  });
-}
-
-async function pollError(svc: TestServices, deviceCode: string) {
-  const response = await poll(svc, deviceCode);
-  expect(response.status).toBe(400);
-  return (await response.json<DeviceErrorBody>()).error;
-}
 
 /** A machine name no other test uses. */
 function machineName(): string {
   return `m-${crypto.randomUUID().slice(0, 8)}`;
 }
 
+/** A GitHub token the fake accepts for `who`, as a team member unless told otherwise. */
+function githubToken(
+  svc: TestServices,
+  who: { githubId: number; login: string },
+  member = true,
+): string {
+  const token = `gho_${crypto.randomUUID()}`;
+  svc.github.users.set(token, { githubId: who.githubId, login: who.login });
+  if (member) svc.github.members.add(who.login);
+  return token;
+}
+
+/** `POST /v1/login` from a client address no other call uses. */
+function exchange(
+  svc: TestServices,
+  body: unknown,
+  ip = `198.51.100.${Math.floor(Math.random() * 250)}-${crypto.randomUUID()}`,
+): Promise<Response> {
+  return agent(svc, null, "POST", "/v1/login", body, {
+    "cf-connecting-ip": ip,
+  });
+}
+
 /** Logs a machine in for `owner` and returns its credential. */
 async function login(
   svc: TestServices,
-  owner: { cookie: string },
+  owner: { githubId: number; login: string },
   name = machineName(),
 ) {
-  const started = await start(svc, null);
-  const approved = await browser(
-    svc,
-    owner.cookie,
-    "POST",
-    "/v1/inbox/device/approve",
-    { userCode: started.user_code, machine: name },
-  );
-  expect(approved.status).toBe(204);
-  const response = await poll(svc, started.device_code);
+  const response = await exchange(svc, {
+    githubToken: githubToken(svc, owner),
+    machine: name,
+  });
   expect(response.status).toBe(200);
   const token = await response.json<MachineToken>();
-  return { name, credential: token.access_token };
+  return { name, credential: token.credential };
 }
 
 /** Calls the agent API with a machine credential acting as `as`. */
@@ -179,215 +139,170 @@ async function fillRequesters(owner: number, name: string, n: number) {
   );
 }
 
-describe("device authorization", () => {
-  it("issues a machine credential once the person approves, stored only as a hash", async () => {
+describe("logging in", () => {
+  it("tells the CLI which GitHub app to use", async () => {
+    const svc = services();
+    const response = await agent(svc, null, "GET", "/v1/login");
+    expect(await response.json<LoginConfig>()).toEqual({
+      githubClientId: "client",
+      scope: "read:org",
+    });
+  });
+
+  it("exchanges a team member's GitHub token for a machine credential, stored only as a hash", async () => {
     const svc = services();
     const me = await person(svc);
-    const started = await start(svc, "studio");
-    expect(started.user_code).toMatch(
-      /^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/,
-    );
-    expect(started.device_code).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    expect(started).toMatchObject({
-      verification_uri: `${ORIGIN}/#device`,
-      verification_uri_complete: `${ORIGIN}/#device=${started.user_code}`,
-      expires_in: 900,
-      interval: 5,
-    });
-
-    // The inbox finds the login by its code, typed loosely.
-    const typed = started.user_code.replace("-", "").toLowerCase();
-    const lookup = await browser(svc, me.cookie, "POST", "/v1/inbox/device", {
-      userCode: typed,
-    });
-    expect(lookup.status).toBe(200);
-    expect(await lookup.json()).toMatchObject({ suggested: "studio" });
-
-    expect(await pollError(svc, started.device_code)).toBe(
-      "authorization_pending",
-    );
+    const token = githubToken(svc, me);
     const name = machineName();
-    const approved = await browser(
-      svc,
-      me.cookie,
-      "POST",
-      "/v1/inbox/device/approve",
-      {
-        userCode: typed,
-        machine: name,
-      },
-    );
-    expect(approved.status).toBe(204);
-
-    svc.clock.now += 5_000;
-    const response = await poll(svc, started.device_code);
+    const response = await exchange(svc, { githubToken: token, machine: name });
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("no-store");
-    const token = await response.json<MachineToken>();
-    expect(token).toMatchObject({
-      token_type: "Bearer",
-      machine: name,
-      owner: me.login,
-    });
-    expect(token.access_token).toMatch(/^rogm_[A-Za-z0-9_-]{43}$/);
+    const issued = await response.json<MachineToken>();
+    expect(issued).toMatchObject({ machine: name, owner: me.login });
+    expect(issued.credential).toMatch(/^rogm_[A-Za-z0-9_-]{43}$/);
     expect(
       await count(
         "machines",
-        "hash = ? AND owner = ?",
-        await sha256(token.access_token),
+        "hash = ? AND owner = ? AND name = ?",
+        await sha256(issued.credential),
         me.githubId,
+        name,
       ),
     ).toBe(1);
-    expect(await count("machines", "hash = ?", token.access_token)).toBe(0);
-
-    // The device code works once.
-    svc.clock.now += 5_000;
-    expect(await pollError(svc, started.device_code)).toBe("invalid_grant");
-    expect(await count("machines", "owner = ?", me.githubId)).toBe(1);
+    expect(await count("machines", "hash = ?", issued.credential)).toBe(0);
+    // The GitHub token is revoked and cannot be exchanged again.
+    expect(svc.github.revoked).toEqual([token]);
+    expect(
+      (await agent(svc, issued.credential, "GET", "/v1/asks")).status,
+    ).toBe(200);
   });
 
-  it("tells a client that polls too fast to slow down, and grows its interval", async () => {
+  it("signs up a team member who never used the inbox", async () => {
     const svc = services();
-    const started = await start(svc);
-    expect(await pollError(svc, started.device_code)).toBe(
-      "authorization_pending",
-    );
-    svc.clock.now += 1_000;
-    expect(await pollError(svc, started.device_code)).toBe("slow_down");
-    // The interval is now 10 s from the last poll.
-    svc.clock.now += 6_000;
-    expect(await pollError(svc, started.device_code)).toBe("slow_down");
-    svc.clock.now += 15_000;
-    expect(await pollError(svc, started.device_code)).toBe(
-      "authorization_pending",
-    );
+    const newcomer = {
+      githubId: 7_000_000 + Math.floor(Math.random() * 1e6),
+      login: `new-${crypto.randomUUID().slice(0, 8)}`,
+    };
+    const studio = await login(svc, newcomer);
+    const created = await createAsk(svc, studio.credential, question());
+    expect(created.to).toBe(newcomer.login);
   });
 
-  it("refuses the login once the person denies it", async () => {
+  it("refuses someone outside the team, and still revokes their token", async () => {
+    const svc = services();
+    const outsider = await person(svc);
+    const token = githubToken(svc, outsider, false);
+    const response = await exchange(svc, {
+      githubToken: token,
+      machine: machineName(),
+    });
+    expect(response.status).toBe(403);
+    expect(await count("machines", "owner = ?", outsider.githubId)).toBe(0);
+    expect(svc.github.revoked).toEqual([token]);
+  });
+
+  it("refuses a token GitHub does not accept", async () => {
+    const svc = services();
+    const response = await exchange(svc, {
+      githubToken: "gho_unknown",
+      machine: machineName(),
+    });
+    expect(response.status).toBe(401);
+  });
+
+  it("asks to retry when GitHub cannot confirm membership, and issues nothing", async () => {
     const svc = services();
     const me = await person(svc);
-    const started = await start(svc);
-    const denied = await browser(
-      svc,
-      me.cookie,
-      "POST",
-      "/v1/inbox/device/deny",
-      {
-        userCode: started.user_code,
-      },
-    );
-    expect(denied.status).toBe(204);
-    expect(await pollError(svc, started.device_code)).toBe("access_denied");
-    const late = await browser(
-      svc,
-      me.cookie,
-      "POST",
-      "/v1/inbox/device/approve",
-      {
-        userCode: started.user_code,
-        machine: machineName(),
-      },
-    );
-    expect(late.status).toBe(404);
+    svc.github.outage = true;
+    const token = githubToken(svc, me);
+    const response = await exchange(svc, {
+      githubToken: token,
+      machine: machineName(),
+    });
+    expect(response.status).toBe(503);
     expect(await count("machines", "owner = ?", me.githubId)).toBe(0);
+    expect(svc.github.revoked).toEqual([token]);
   });
 
-  it("expires an unapproved login after 15 minutes", async () => {
+  it("rejects a malformed request before calling GitHub", async () => {
     const svc = services();
     const me = await person(svc);
-    const started = await start(svc);
-    svc.clock.now += minutes(15);
-    expect(await pollError(svc, started.device_code)).toBe("expired_token");
-    const late = await browser(
-      svc,
-      me.cookie,
-      "POST",
-      "/v1/inbox/device/approve",
-      {
-        userCode: started.user_code,
-        machine: machineName(),
-      },
-    );
-    expect(late.status).toBe(404);
-    const lookup = await browser(svc, me.cookie, "POST", "/v1/inbox/device", {
-      userCode: started.user_code,
-    });
-    expect(lookup.status).toBe(404);
-  });
-
-  it("does not issue a credential for a login approved just before it expired", async () => {
-    const svc = services();
-    const me = await person(svc);
-    const started = await start(svc);
-    svc.clock.now += minutes(15) - 1;
-    const approved = await browser(
-      svc,
-      me.cookie,
-      "POST",
-      "/v1/inbox/device/approve",
-      {
-        userCode: started.user_code,
-        machine: machineName(),
-      },
-    );
-    expect(approved.status).toBe(204);
-    svc.clock.now += 1;
-    expect(await pollError(svc, started.device_code)).toBe("expired_token");
-    expect(await count("machines", "owner = ?", me.githubId)).toBe(0);
-  });
-
-  it("rejects malformed device requests", async () => {
-    const svc = services();
-    const wrongClient = await form(svc, "/v1/device/code", {
-      client_id: "other",
-    });
-    expect(wrongClient.status).toBe(401);
-    expect((await wrongClient.json<DeviceErrorBody>()).error).toBe(
-      "invalid_client",
-    );
-    const badName = await form(svc, "/v1/device/code", {
-      client_id: "roger-cli",
-      machine: "Studio/../x",
-    });
-    expect((await badName.json<DeviceErrorBody>()).error).toBe(
-      "invalid_request",
-    );
-    const asJson = await agent(svc, null, "POST", "/v1/device/code", {
-      client_id: "roger-cli",
-    });
-    expect((await asJson.json<DeviceErrorBody>()).error).toBe(
-      "invalid_request",
-    );
-
-    const started = await start(svc);
-    const wrongGrant = await form(svc, "/v1/device/token", {
-      client_id: "roger-cli",
-      grant_type: "authorization_code",
-      device_code: started.device_code,
-    });
-    expect((await wrongGrant.json<DeviceErrorBody>()).error).toBe(
-      "unsupported_grant_type",
-    );
-    expect(await pollError(svc, "not-a-device-code")).toBe("invalid_grant");
-  });
-
-  it("needs a signed-in person to approve, deny, or look up a code", async () => {
-    const svc = services();
-    const started = await start(svc);
-    for (const path of [
-      "/v1/inbox/device",
-      "/v1/inbox/device/approve",
-      "/v1/inbox/device/deny",
+    for (const body of [
+      { githubToken: githubToken(svc, me), machine: "Studio/../x" },
+      { githubToken: "", machine: "studio" },
+      { machine: "studio" },
+      { githubToken: "x", machine: "studio", extra: 1 },
     ]) {
-      const response = await browser(svc, null, "POST", path, {
-        userCode: started.user_code,
-        machine: machineName(),
-      });
-      expect(response.status, path).toBe(401);
+      const response = await exchange(svc, body);
+      expect(response.status, JSON.stringify(body)).toBe(400);
     }
-    expect(await pollError(svc, started.device_code)).toBe(
-      "authorization_pending",
+    expect(svc.github.revoked).toEqual([]);
+    expect(await count("machines", "owner = ?", me.githubId)).toBe(0);
+  });
+
+  it("limits logins per client address, leaving other addresses alone", async () => {
+    const svc = services();
+    const me = await person(svc);
+    const from = (ip: string) =>
+      exchange(
+        svc,
+        { githubToken: githubToken(svc, me), machine: machineName() },
+        ip,
+      );
+    for (let i = 0; i < svc.limiter.limit; i++)
+      expect((await from("203.0.113.7")).status).toBe(200);
+    const limited = await from("203.0.113.7");
+    expect(limited.status).toBe(429);
+    expect((await errorOf(limited)).code).toBe("too_many_requests");
+    expect((await from("198.51.100.9")).status).toBe(200);
+  });
+
+  it("refuses every login when the deployment has no limiter", async () => {
+    const svc = services();
+    const me = await person(svc);
+    svc.loginLimit = null;
+    const response = await exchange(svc, {
+      githubToken: githubToken(svc, me),
+      machine: machineName(),
+    });
+    expect(response.status).toBe(429);
+    expect(await count("machines", "owner = ?", me.githubId)).toBe(0);
+  });
+
+  it("keeps each machine name to one person, and a new login replaces the owner's old one", async () => {
+    const svc = services();
+    const me = await person(svc);
+    const other = await person(svc);
+    const studio = await login(svc, me);
+    const created = await createAsk(svc, studio.credential, question());
+
+    const theirs = await exchange(svc, {
+      githubToken: githubToken(svc, other),
+      machine: studio.name,
+    });
+    expect(theirs.status).toBe(409);
+    expect((await errorOf(theirs)).message).toContain("Someone else");
+    expect(await count("machines", "owner = ?", other.githubId)).toBe(0);
+
+    // Until the new credential is used, the old one keeps working, so a
+    // login whose credential is never saved takes nothing offline.
+    const again = await login(svc, me, studio.name);
+    expect(
+      (await agent(svc, studio.credential, "GET", "/v1/asks")).status,
+    ).toBe(200);
+    const read = await agent(
+      svc,
+      again.credential,
+      "GET",
+      `/v1/asks/${created.id}`,
     );
+    expect(read.status).toBe(200);
+    expect(
+      (await agent(svc, studio.credential, "GET", "/v1/asks")).status,
+    ).toBe(401);
+    expect(
+      await count("machines", "owner = ? AND revoked_at IS NULL", me.githubId),
+    ).toBe(1);
   });
 
   it("replaces by issuance order, not by id order", async () => {
@@ -418,90 +333,6 @@ describe("device authorization", () => {
     expect((await agent(svc, newer.credential, "GET", "/v1/asks")).status).toBe(
       401,
     );
-  });
-
-  it("keeps each machine name to one person, and a new login replaces the owner's old one", async () => {
-    const svc = services();
-    const me = await person(svc);
-    const other = await person(svc);
-    const studio = await login(svc, me);
-    const created = await createAsk(svc, studio.credential, question());
-
-    const approve = (cookie: string, userCode: string, machine: string) =>
-      browser(svc, cookie, "POST", "/v1/inbox/device/approve", {
-        userCode,
-        machine,
-      });
-    const theirs = await approve(
-      other.cookie,
-      (await start(svc)).user_code,
-      studio.name,
-    );
-    expect(theirs.status).toBe(409);
-    expect((await errorOf(theirs)).message).toContain("Someone else");
-
-    // Until the new credential is used, the old one keeps working, so a
-    // login that is never collected or saved takes nothing offline.
-    const again = await start(svc);
-    expect(
-      (await approve(me.cookie, again.user_code, studio.name)).status,
-    ).toBe(204);
-    const token = await (
-      await poll(svc, again.device_code)
-    ).json<MachineToken>();
-    expect(
-      (await agent(svc, studio.credential, "GET", "/v1/asks")).status,
-    ).toBe(200);
-    expect(
-      (await agent(svc, token.access_token, "GET", "/v1/asks")).status,
-    ).toBe(200);
-    expect(
-      (await agent(svc, studio.credential, "GET", "/v1/asks")).status,
-    ).toBe(401);
-    const read = await agent(
-      svc,
-      token.access_token,
-      "GET",
-      `/v1/asks/${created.id}`,
-    );
-    expect(read.status).toBe(200);
-    expect(
-      await count("machines", "owner = ? AND revoked_at IS NULL", me.githubId),
-    ).toBe(1);
-  });
-
-  it("refuses to issue a name another person's machine took after approval", async () => {
-    const svc = services();
-    const me = await person(svc);
-    const other = await person(svc);
-    const name = machineName();
-    const mine = await start(svc);
-    const theirs = await start(svc);
-    const approve = (cookie: string, userCode: string) =>
-      browser(svc, cookie, "POST", "/v1/inbox/device/approve", {
-        userCode,
-        machine: name,
-      });
-    expect((await approve(me.cookie, mine.user_code)).status).toBe(204);
-    // The other approval sees mine pending and is refused.
-    expect((await approve(other.cookie, theirs.user_code)).status).toBe(409);
-    // Had both passed the check, the index refuses the second credential.
-    await env.DB.prepare(
-      "INSERT INTO machines (id, name, owner, hash, generation, created_at) VALUES (?, ?, ?, ?, 1, 0)",
-    )
-      .bind(crypto.randomUUID(), name, other.githubId, crypto.randomUUID())
-      .run();
-    expect(await pollError(svc, mine.device_code)).toBe("invalid_grant");
-    expect(await count("machines", "owner = ?", me.githubId)).toBe(0);
-  });
-
-  it("sweeps expired logins", async () => {
-    const svc = services();
-    const started = await start(svc);
-    const hash = await sha256(started.device_code);
-    svc.clock.now += minutes(16);
-    await svc.machines.sweep(svc.now(), 200);
-    expect(await count("device_codes", "device_hash = ?", hash)).toBe(0);
   });
 });
 
@@ -859,119 +690,6 @@ describe("static tokens", () => {
   });
 });
 
-describe("login admission", () => {
-  it("limits starts per client address, leaving other addresses alone", async () => {
-    const svc = services();
-    const fields = { client_id: "roger-cli" };
-    const from = (ip: string) =>
-      form(svc, "/v1/device/code", fields, { "cf-connecting-ip": ip });
-    for (let i = 0; i < svc.limiter.limit; i++)
-      expect((await from("203.0.113.7")).status).toBe(200);
-    const limited = await from("203.0.113.7");
-    expect(limited.status).toBe(429);
-    expect((await errorOf(limited)).code).toBe("too_many_requests");
-    expect((await from("198.51.100.9")).status).toBe(200);
-  });
-
-  it("refuses every login when the deployment has no limiter", async () => {
-    const svc = services();
-    svc.deviceLimit = null;
-    const before = await count("device_codes", "1 = 1");
-    const response = await form(svc, "/v1/device/code", {
-      client_id: "roger-cli",
-    });
-    expect(response.status).toBe(429);
-    expect(await count("device_codes", "1 = 1")).toBe(before);
-  });
-
-  it("counts only pending logins toward the global cap, and recovers when they expire", async () => {
-    // A time no other test uses, so only this test's logins are unexpired.
-    const svc = services(Date.parse("2031-03-03T15:00:00Z"));
-    svc.machines = new Machines(env.DB, 3);
-    const me = await person(svc);
-    const started = [await start(svc), await start(svc), await start(svc)];
-    const refused = await form(svc, "/v1/device/code", {
-      client_id: "roger-cli",
-    });
-    expect(refused.status).toBe(503);
-    // A denied login no longer waits, so it frees its place.
-    await browser(svc, me.cookie, "POST", "/v1/inbox/device/deny", {
-      userCode: started[0]?.user_code,
-    });
-    await start(svc);
-    expect(
-      (await form(svc, "/v1/device/code", { client_id: "roger-cli" })).status,
-    ).toBe(503);
-    // Once they expire, starts are admitted again and delete the expired rows.
-    svc.clock.now += minutes(15);
-    await start(svc);
-    expect(await count("device_codes", "expires_at <= ?", svc.now())).toBe(0);
-  });
-
-  it("limits code attempts per person", async () => {
-    const svc = services();
-    const me = await person(svc);
-    const other = await person(svc);
-    const started = await start(svc);
-    for (let i = 0; i < DEVICE_ATTEMPTS; i++) {
-      const guess = await browser(svc, me.cookie, "POST", "/v1/inbox/device", {
-        userCode: "BBBB-BBBB",
-      });
-      expect(guess.status).toBe(404);
-    }
-    const blocked = await browser(
-      svc,
-      me.cookie,
-      "POST",
-      "/v1/inbox/device/approve",
-      {
-        userCode: started.user_code,
-        machine: machineName(),
-      },
-    );
-    expect(blocked.status).toBe(429);
-    const lookup = await browser(
-      svc,
-      other.cookie,
-      "POST",
-      "/v1/inbox/device",
-      {
-        userCode: started.user_code,
-      },
-    );
-    expect(lookup.status).toBe(200);
-    svc.clock.now += DEVICE_ATTEMPT_WINDOW_MS;
-    const fresh = await start(svc);
-    const later = await browser(svc, me.cookie, "POST", "/v1/inbox/device", {
-      userCode: fresh.user_code,
-    });
-    expect(later.status).toBe(200);
-  });
-
-  it("shows where a login came from", async () => {
-    const svc = services();
-    const me = await person(svc);
-    const response = await form(
-      svc,
-      "/v1/device/code",
-      { client_id: "roger-cli" },
-      {
-        "cf-connecting-ip": "203.0.113.7",
-        "user-agent": `roger/0.1.3 ${"x".repeat(300)}`,
-      },
-    );
-    const started = await response.json<DeviceAuthorization>();
-    const lookup = await (
-      await browser(svc, me.cookie, "POST", "/v1/inbox/device", {
-        userCode: started.user_code,
-      })
-    ).json<{ source: string; userAgent: string }>();
-    expect(lookup.source).toBe("203.0.113.7");
-    expect(lookup.userAgent).toHaveLength(200);
-    expect(lookup.userAgent.startsWith("roger/0.1.3 ")).toBe(true);
-  });
-});
-
 describe("machine names", () => {
   it("are free again once revoked; the previous owner's requesters move aside and stay theirs", async () => {
     const svc = services();
@@ -1093,6 +811,24 @@ describe("machine names", () => {
       after = page.next;
     }
     expect(seen).toHaveLength(MACHINE_PAGE + 1);
+    // An empty cursor is the first page.
+    for (const path of [
+      "/v1/inbox/machines?after=",
+      "/v1/inbox/requesters?after=",
+    ]) {
+      const first = await browser(svc, me.cookie, "GET", path);
+      expect(first.status, path).toBe(200);
+    }
+    const firstMachines = await (
+      await browser(svc, me.cookie, "GET", "/v1/inbox/machines?after=")
+    ).json<{ machines: { id: string }[] }>();
+    expect(firstMachines.machines.map((m) => m.id)).toEqual(
+      seen.slice(0, MACHINE_PAGE),
+    );
+    expect(
+      (await browser(svc, me.cookie, "GET", "/v1/inbox/machines?after=nope"))
+        .status,
+    ).toBe(400);
     const last = seen.at(-1);
     expect(
       (
@@ -1107,70 +843,5 @@ describe("machine names", () => {
     expect(
       await count("machines", "id = ? AND revoked_at IS NOT NULL", last),
     ).toBe(1);
-  });
-});
-
-describe("the approval page", () => {
-  /** A lookup whose answers the test releases in any order. */
-  function controlled() {
-    const calls: {
-      code: string;
-      resolve: (v: string) => void;
-      reject: (e: Error) => void;
-    }[] = [];
-    const flow = deviceApproval(
-      (code) =>
-        new Promise<string>((resolve, reject) => {
-          calls.push({ code, resolve, reject });
-        }),
-    );
-    return { flow, calls };
-  }
-
-  it("approves only the looked-up code while it is still typed", async () => {
-    const { flow, calls } = controlled();
-    const found = flow.lookup("bcdf-ghjk");
-    calls[0]?.resolve("login A");
-    expect(await found).toEqual({
-      kind: "ready",
-      code: "BCDFGHJK",
-      pending: "login A",
-    });
-    expect(flow.target("BCDF-GHJK")?.code).toBe("BCDFGHJK");
-    // Typing another code does not approve the old one.
-    expect(flow.target("MNPQ-RSTV")).toBeNull();
-  });
-
-  it("forgets the looked-up login on any edit", async () => {
-    const { flow, calls } = controlled();
-    const found = flow.lookup("BCDF-GHJK");
-    calls[0]?.resolve("login A");
-    await found;
-    flow.edit();
-    expect(flow.target("BCDF-GHJK")).toBeNull();
-  });
-
-  it("forgets the old login when a second lookup fails", async () => {
-    const { flow, calls } = controlled();
-    const first = flow.lookup("BCDF-GHJK");
-    calls[0]?.resolve("login A");
-    await first;
-    const second = flow.lookup("MNPQ-RSTV");
-    calls[1]?.reject(new Error("No login is waiting for that code."));
-    expect((await second).kind).toBe("failed");
-    expect(flow.target("BCDF-GHJK")).toBeNull();
-    expect(flow.target("MNPQ-RSTV")).toBeNull();
-  });
-
-  it("ignores an older lookup that answers last", async () => {
-    const { flow, calls } = controlled();
-    const older = flow.lookup("BCDF-GHJK");
-    const newer = flow.lookup("MNPQ-RSTV");
-    calls[1]?.resolve("login B");
-    calls[0]?.resolve("login A");
-    expect((await newer).kind).toBe("ready");
-    expect(await older).toEqual({ kind: "stale" });
-    expect(flow.target("BCDF-GHJK")).toBeNull();
-    expect(flow.target("MNPQ-RSTV")?.pending).toBe("login B");
   });
 });

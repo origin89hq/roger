@@ -2,16 +2,13 @@
 // The Roger inbox. Plain DOM, no build step; every string from the API is
 // inserted as text, never as HTML.
 
-import { deviceApproval, formatCode } from "./device.js";
-
 /** @typedef {import("../src/protocol.gen.ts").Ask} Ask */
 /** @typedef {import("../src/protocol.gen.ts").AskOption} AskOption */
 /** @typedef {{ ask: Ask, reason: "not_delivered" | "not_finished" }} Stalled */
 /** @typedef {{ login: string, githubId: number, ntfyTopic: string | null, pushes: boolean, passkeys: { id: string, createdAt: number, lastUsedAt: number | null }[] }} Me */
 /** @typedef {{ id: string, name: string, pickupMinutes: number, completionMinutes: number, createdBy: string | null, createdAt: number, disabledAt: number | null, machine: string | null, tokens: { id: string, createdAt: number, revokedAt: number | null }[] }} RequesterView */
 /** @typedef {{ id: string, name: string, createdAt: number, requesters: { id: string, name: string, disabledAt: number | null }[] }} MachineView */
-/** @typedef {{ suggested: string | null, source: string | null, userAgent: string | null, createdAt: number, expiresAt: number }} PendingLogin */
-/** @typedef {"inbox" | "history" | "settings" | "device"} View */
+/** @typedef {"inbox" | "history" | "settings"} View */
 
 const state = {
   /** @type {Me | null} */ me: null,
@@ -1236,154 +1233,6 @@ async function revokeMachine(id) {
   }
 }
 
-// ---- Machine login ---------------------------------------------------------------
-
-/**
- * Approves or denies a `roger login`. The person types the code from their
- * own terminal: a link can carry someone else's code, so a code in the URL
- * is never used (RFC 8628 sections 3.3.1 and 5.4). Codes go to the API only
- * in request bodies.
- * @param {boolean} fromLink
- */
-function renderDevice(fromLink) {
-  const flow = deviceApproval(
-    (code) =>
-      /** @type {Promise<PendingLogin>} */ (
-        api("POST", "/v1/inbox/device", { userCode: code })
-      ),
-  );
-  const code = /** @type {HTMLInputElement} */ (
-    el("input", {
-      placeholder: "BCDF-GHJK",
-      autocomplete: "off",
-      "aria-label": "Code from roger login",
-    })
-  );
-  const result = el("div");
-  // Any edit forgets the looked-up login and its buttons.
-  code.addEventListener("input", () => {
-    flow.edit();
-    result.replaceChildren();
-  });
-  const lookup = async () => {
-    result.replaceChildren(el("p", { class: "none" }, "Looking up…"));
-    const found = await flow.lookup(code.value);
-    if (found.kind === "stale") return;
-    if (found.kind === "failed") {
-      result.replaceChildren();
-      notify(
-        found.error instanceof Error
-          ? found.error.message
-          : String(found.error),
-        true,
-      );
-      return;
-    }
-    const { pending } = found;
-    const shown = formatCode(found.code);
-    const machine = /** @type {HTMLInputElement} */ (
-      el("input", {
-        value: pending.suggested ?? "",
-        placeholder: "studio",
-        "aria-label": "Machine name",
-      })
-    );
-    /** @param {"approve" | "deny"} verb */
-    const decide = async (verb) => {
-      // Only the login whose code is still in the input.
-      const target = flow.target(code.value);
-      if (!target) {
-        notify(
-          "The code changed. Continue with the code from your terminal.",
-          true,
-        );
-        return;
-      }
-      try {
-        await api(
-          "POST",
-          `/v1/inbox/device/${verb}`,
-          verb === "approve"
-            ? { userCode: target.code, machine: machine.value.trim() }
-            : { userCode: target.code },
-        );
-        flow.edit();
-        result.replaceChildren(
-          el(
-            "p",
-            {},
-            verb === "approve"
-              ? `Approved ${shown}. ${machine.value.trim()} is logged in once roger login finishes.`
-              : `Denied ${shown}. roger login stops on that machine.`,
-          ),
-        );
-      } catch (error) {
-        notify(error instanceof Error ? error.message : String(error), true);
-      }
-    };
-    result.replaceChildren(
-      el(
-        "dl",
-        {},
-        el("dt", {}, "Code"),
-        el("dd", { class: "mono" }, shown),
-        el("dt", {}, "Started"),
-        el("dd", {}, ago(pending.createdAt)),
-        el("dt", {}, "From"),
-        el("dd", {}, pending.source ?? "unknown"),
-        el("dt", {}, "Client"),
-        el("dd", {}, pending.userAgent ?? "unknown"),
-      ),
-      el(
-        "p",
-        {},
-        `Approve only if ${shown} is the code in your terminal and you started this login. Its automations become requesters named after the machine, such as ${pending.suggested ?? "studio"}/default. A machine of yours with the same name is logged out once this one is used, and this one takes over its requesters.`,
-      ),
-      el(
-        "div",
-        { class: "inline-form" },
-        machine,
-        el(
-          "button",
-          { onclick: () => void decide("approve") },
-          `Approve ${shown}`,
-        ),
-        el(
-          "button",
-          { class: "quiet", onclick: () => void decide("deny") },
-          `Deny ${shown}`,
-        ),
-      ),
-    );
-  };
-  $("device-view").replaceChildren(
-    el(
-      "section",
-      {},
-      el("h2", {}, "Log in a machine"),
-      el(
-        "p",
-        {},
-        "Type the code that roger login printed in your own terminal. The machine can then ask you for decisions and read your answers as any of its requesters, until you revoke it in Settings.",
-      ),
-      fromLink
-        ? el(
-            "p",
-            { class: "none" },
-            "This page was opened from a link. Links can carry someone else's code, so type the one from your terminal.",
-          )
-        : null,
-      el(
-        "div",
-        { class: "inline-form" },
-        code,
-        el("button", { onclick: () => void lookup() }, "Continue"),
-      ),
-      result,
-    ),
-  );
-}
-
 /** @param {string} id */
 async function disable(id) {
   try {
@@ -1399,12 +1248,7 @@ async function disable(id) {
 function showSignedOut() {
   state.me = null;
   $("nav").hidden = true;
-  for (const id of [
-    "inbox-view",
-    "history-view",
-    "settings-view",
-    "device-view",
-  ])
+  for (const id of ["inbox-view", "history-view", "settings-view"])
     $(id).hidden = true;
   $("signed-out").hidden = false;
 }
@@ -1446,7 +1290,6 @@ async function show(view) {
   $("inbox-view").hidden = view !== "inbox";
   $("history-view").hidden = view !== "history";
   $("settings-view").hidden = view !== "settings";
-  $("device-view").hidden = view !== "device";
   try {
     if (view === "inbox") await loadInbox();
     if (view === "history") await loadHistory(false);
@@ -1461,13 +1304,6 @@ async function route() {
   const hash = location.hash.slice(1);
   const [name, id] = hash.split("=");
   if (name === "settings") return show("settings");
-  if (name === "device") {
-    await show("device");
-    // A code in the link is never used; drop it from the address bar.
-    if (id) history.replaceState(null, "", "#device");
-    renderDevice(id !== undefined);
-    return;
-  }
   if (name === "history") {
     await show("history");
     if (id) await select(id);

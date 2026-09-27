@@ -27,8 +27,10 @@ pub enum Error {
     },
     #[error("no config directory: set HOME or XDG_CONFIG_HOME")]
     NoConfigDir,
-    #[error("the login was denied in the inbox")]
+    #[error("the login was denied on GitHub")]
     LoginDenied,
+    #[error("could not tell this host's name; pass --machine <name>")]
+    NoMachineName,
     #[error("the login code expired before it was approved; run `roger login` again")]
     LoginExpired,
     #[error("login failed: {0}")]
