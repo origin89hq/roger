@@ -7,7 +7,7 @@
 /** @typedef {{ ask: Ask, reason: "not_delivered" | "not_finished" }} Stalled */
 /** @typedef {{ login: string, githubId: number, ntfyTopic: string | null, pushes: boolean, passkeys: { id: string, createdAt: number, lastUsedAt: number | null }[] }} Me */
 /** @typedef {{ id: string, name: string, pickupMinutes: number, completionMinutes: number, createdBy: string | null, createdAt: number, disabledAt: number | null, machine: string | null, tokens: { id: string, createdAt: number, revokedAt: number | null }[] }} RequesterView */
-/** @typedef {{ id: string, name: string, createdAt: number, requesters: { id: string, name: string, disabledAt: number | null }[] }} MachineView */
+/** @typedef {{ id: string, name: string, source: string, userAgent: string | null, createdAt: number, requesters: { id: string, name: string, disabledAt: number | null }[] }} MachineView */
 /** @typedef {"inbox" | "history" | "settings"} View */
 
 const state = {
@@ -975,7 +975,7 @@ async function renderSettings(load = "first") {
                   el(
                     "div",
                     { class: "none" },
-                    `Logged in ${when(m.createdAt)}`,
+                    `Logged in ${when(m.createdAt)} from ${m.source}${m.userAgent ? ` (${m.userAgent})` : ""}`,
                   ),
                 ),
                 el(

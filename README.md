@@ -70,7 +70,14 @@ token from the job. `ROGER_URL` defaults to `https://roger.origin89.com`.
 The Worker admits 10 logins per minute per client IP, through the `LOGINS`
 rate-limit binding in `wrangler.jsonc`; without the binding it
 refuses every login. Machines behind one NAT share that limit, so log them in
-one at a time.
+one at a time. A login refused by the limiter does not revoke the GitHub token
+it carried, so a limited address cannot make Roger call GitHub. That token
+stays valid, since tokens of an OAuth App do not expire (GitHub removes them
+after about a year unused); revoke it under GitHub Settings > Applications >
+Authorized OAuth Apps > Roger. Every other refusal revokes it, except a body
+over 4 KiB, which is not read. Each login pushes a notice to its owner with
+the machine name and address, and Settings shows where each machine logged in
+from.
 
 ## Agent skills
 
@@ -154,6 +161,14 @@ or every sign-in is refused as not a member.
 | `GITHUB_ORG`, `GITHUB_TEAM` | Only active members of this team can sign in |
 | `NTFY_URL`, `NTFY_TOKEN` | ntfy server and optional token; an empty URL disables pushes. Each person picks a topic in Settings |
 | `TIME_ZONE`, `WORK_HOURS`, `WORK_DAYS` | Working hours for quiet hours, `soon` pushes, expiry, and the digest |
+
+Removing someone from `GITHUB_TEAM` or the organization stops new sign-ins
+and logins, but does not revoke their machines or requester tokens. Revoke
+them in D1, with `<github id>` their numeric GitHub user id:
+
+```sh
+pnpm --filter roger-worker exec wrangler d1 execute roger --remote --command "UPDATE machines SET revoked_at = unixepoch() * 1000 WHERE owner = <github id> AND revoked_at IS NULL; UPDATE tokens SET revoked_at = unixepoch() * 1000 WHERE revoked_at IS NULL AND requester_id IN (SELECT id FROM requesters WHERE created_by = <github id>); DELETE FROM sessions WHERE github_id = <github id>"
+```
 
 A passkey can only be removed from D1 directly:
 `pnpm --filter roger-worker exec wrangler d1 execute roger --remote --command "DELETE FROM passkeys WHERE id = '<credential id>'"`.

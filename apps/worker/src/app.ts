@@ -10,10 +10,15 @@ import {
 import type { Config } from "./config.ts";
 import { evidenceProblem } from "./evidence.ts";
 import type { GitHub } from "./github.ts";
-import { failure, json, jsonBody } from "./http.ts";
+import { failure, isJson, json, jsonBody } from "./http.ts";
 import { canonicalJson, secret, sha256 } from "./ids.ts";
 import { DEFAULT_AUTOMATION, type Machine, type Machines } from "./machines.ts";
-import { askPush, type Notifier, passkeyAddedPush } from "./notify.ts";
+import {
+  askPush,
+  machineLoginPush,
+  type Notifier,
+  passkeyAddedPush,
+} from "./notify.ts";
 import type { Passkeys } from "./passkeys.ts";
 import type {
   Ask,
@@ -71,8 +76,20 @@ const OAUTH_COOKIE = "__Host-roger-oauth";
 const INBOX_LIMIT = 200;
 const HISTORY_LIMIT = 50;
 const REQUESTER_PAGE = 100;
-/** What `roger login` asks GitHub for: enough to check team membership. */
+/** What sign-in and `roger login` ask GitHub for: enough to check team membership. */
 const LOGIN_SCOPE = "read:org";
+/** Attempts to revoke a GitHub token before giving up on a login. */
+const REVOKE_ATTEMPTS = 3;
+
+/** Where a request came from, as Settings and the login push show it. */
+function describeSource(request: Request) {
+  const ip = request.headers.get("cf-connecting-ip") ?? "unknown";
+  const country = (request as { cf?: { country?: unknown } }).cf?.country;
+  return {
+    source: typeof country === "string" ? `${ip} (${country})` : ip,
+    userAgent: request.headers.get("user-agent")?.slice(0, 200) ?? null,
+  };
+}
 /** Names the automation a machine credential acts for. */
 const REQUESTER_HEADER = "roger-requester";
 const CREDENTIAL = /^Bearer ((?:roger|rogm)_[A-Za-z0-9_-]{43})$/;
@@ -268,16 +285,51 @@ export function createApp(svc: Services): Hono<Env> {
 
   /**
    * Exchanges a GitHub token from the device flow for a machine credential.
-   * The token must have been issued to this app; then the same checks as
-   * signing in to the inbox. Team membership is checked here only: removing
-   * someone from the team does not revoke their machines, so revoke them in
-   * Settings. The GitHub token is revoked on every path and never stored.
+   * The token must have been issued to this app; then the same membership
+   * check as inbox sign-in; then the token is revoked, and only once GitHub
+   * confirms that is a credential issued. Team membership is checked here
+   * only: removing someone from the team does not revoke their machines.
+   *
+   * Once the token is read, every refusal revokes it, except two: a refusal
+   * by the rate limiter, so a limited address cannot make Roger call GitHub,
+   * and a token GitHub says is not this app's. A body too large to read
+   * cannot be revoked. The GitHub token is never stored or logged.
    */
   agent.post("/login", async (c) => {
-    // Per source, before GitHub is called. A deployment without the limiter
-    // refuses logins rather than running unlimited.
-    const ip = c.req.header("cf-connecting-ip") ?? "unknown";
-    const allowed = svc.loginLimit ? await svc.loginLimit(ip) : false;
+    const read = await jsonBody(c.req.raw, LIMITS.adminBytes, true);
+    const value = read.ok ? read.value : null;
+    let githubToken =
+      typeof value === "object" &&
+      value !== null &&
+      "githubToken" in value &&
+      typeof value.githubToken === "string" &&
+      value.githubToken.length > 0 &&
+      value.githubToken.length <= 512
+        ? value.githubToken
+        : null;
+    let revoked = false;
+    /** Revokes the token at most once per request. */
+    const revoke = async (): Promise<boolean> => {
+      if (!githubToken || revoked) return true;
+      revoked = true;
+      const token = githubToken;
+      for (let attempt = 0; attempt < REVOKE_ATTEMPTS; attempt++) {
+        const result = await svc.github.revoke(token);
+        if (result === "revoked" || result === "gone") return true;
+      }
+      console.warn({ event: "github_revoke_failed" });
+      return false;
+    };
+    let allowed: boolean;
+    try {
+      const ip = c.req.header("cf-connecting-ip") ?? "unknown";
+      allowed = svc.loginLimit ? await svc.loginLimit(ip) : false;
+    } catch (error) {
+      await revoke();
+      throw error;
+    }
+    // A deployment without the limiter refuses logins rather than running
+    // unlimited. Deliberately not revoked: see above.
     if (!allowed)
       return failure(
         429,
@@ -286,24 +338,35 @@ export function createApp(svc: Services): Hono<Env> {
           ? "Too many logins from this address. Wait a minute and try again."
           : "Logins are not configured on this deployment.",
       );
-    const body = await parse(c.req.raw, LIMITS.adminBytes, machineLogin);
-    if (!body.ok) return body.response;
-    const { githubToken, machine } = body.value;
     try {
+      if (!read.ok) return read.response;
+      if (!isJson(c.req.raw))
+        return failure(
+          415,
+          "invalid_request",
+          "Send the body as application/json.",
+        );
+      const body = machineLogin.safeParse(read.value);
+      if (!body.success)
+        return failure(400, "invalid_request", describeIssues(body.error));
+      const { machine } = body.data;
+      const token = body.data.githubToken;
       // Only a token issued to this app through the device flow: a leaked
       // personal access token or another app's token mints nothing.
-      const user = await svc.github.appUser(githubToken);
+      const user = await svc.github.appUser(token);
       if (user === "unavailable")
         return failure(503, "internal", "GitHub did not answer. Try again.");
-      if (user === "foreign")
+      if (user === "foreign") {
+        githubToken = null;
         return failure(
           401,
           "unauthorized",
           "The GitHub token was not issued to Roger. Run roger login.",
         );
+      }
       const { org, team } = svc.config.github;
       const membership = await svc.github.teamMembership(
-        githubToken,
+        token,
         org,
         team,
         user.login,
@@ -324,16 +387,47 @@ export function createApp(svc: Services): Hono<Env> {
           throw new Error(`unknown membership ${String(unreachable)}`);
         }
       }
+      // The handover completes only when GitHub confirms the token is gone.
+      if (!(await revoke()))
+        return failure(
+          503,
+          "internal",
+          "GitHub did not confirm revoking the login token, so no credential was issued. Try again.",
+        );
       const now = svc.now();
+      const source = describeSource(c.req.raw);
       await svc.accounts.upsertResponder(user, now);
-      const issued = await svc.machines.issue(user.githubId, machine, now);
+      const issued = await svc.machines.issue(
+        user.githubId,
+        machine,
+        source,
+        now,
+      );
       switch (issued.kind) {
-        case "issued":
+        case "issued": {
+          const topic = await svc.accounts.ntfyTopic(user.githubId);
+          if (svc.notifier && topic)
+            svc.defer(
+              svc.notifier
+                .send(
+                  topic,
+                  machineLoginPush(
+                    user.login,
+                    machine,
+                    source.source,
+                    svc.config.origin,
+                  ),
+                )
+                .catch((error) => {
+                  console.warn({ event: "push_failed", error: String(error) });
+                }),
+            );
           return json({
             credential: issued.credential,
             machine,
             owner: user.login,
           } satisfies MachineToken);
+        }
         case "name_taken":
           return failure(409, "conflict", issued.message);
         default: {
@@ -342,9 +436,7 @@ export function createApp(svc: Services): Hono<Env> {
         }
       }
     } finally {
-      // Whatever happened, the GitHub token is not needed again.
-      if (!(await svc.github.revoke(githubToken)))
-        console.warn({ event: "github_revoke_failed" });
+      await revoke();
     }
   });
 
@@ -863,7 +955,7 @@ export function createApp(svc: Services): Hono<Env> {
     const url = new URL("https://github.com/login/oauth/authorize");
     url.searchParams.set("client_id", svc.config.github.clientId);
     url.searchParams.set("redirect_uri", callbackUrl);
-    url.searchParams.set("scope", "read:org");
+    url.searchParams.set("scope", LOGIN_SCOPE);
     url.searchParams.set("state", state);
     url.searchParams.set("allow_signup", "false");
     return c.redirect(url.toString(), 302);

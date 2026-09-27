@@ -22,6 +22,9 @@ export interface Machine {
 export interface MachineView {
   id: string;
   name: string;
+  /** IP address and country of the login. */
+  source: string;
+  userAgent: string | null;
   createdAt: number;
   requesters: { id: string; name: string; disabledAt: number | null }[];
 }
@@ -53,21 +56,34 @@ export class Machines {
    * previous owner are renamed out of the way. The credential is returned
    * once; only its hash is stored.
    */
-  async issue(owner: number, name: string, now: number): Promise<IssueResult> {
+  async issue(
+    owner: number,
+    name: string,
+    from: { source: string; userAgent: string | null },
+    now: number,
+  ): Promise<IssueResult> {
     const credential = secret("rogm_");
     const machineId = ulid(now);
     const [insert] = await this.db.batch([
       this.db
         .prepare(
-          `INSERT INTO machines (id, name, owner, hash, generation, created_at)
+          `INSERT INTO machines (id, name, owner, hash, generation, source, user_agent, created_at)
            SELECT ?1, ?2, ?3, ?4,
                   1 + coalesce((SELECT max(generation) FROM machines g
                                 WHERE g.owner = ?3 AND g.name = ?2), 0),
-                  ?5
+                  ?6, ?7, ?5
            WHERE NOT EXISTS (SELECT 1 FROM machines m WHERE m.name = ?2
                                AND m.owner <> ?3 AND m.revoked_at IS NULL)`,
         )
-        .bind(machineId, name, owner, await sha256(credential), now),
+        .bind(
+          machineId,
+          name,
+          owner,
+          await sha256(credential),
+          now,
+          from.source,
+          from.userAgent,
+        ),
       // `<name>/<job>` becomes `<name>/<job>#<requester id>`: unique, still
       // owned by the previous owner, and reachable through a token only.
       this.db
@@ -141,12 +157,18 @@ export class Machines {
   ): Promise<{ machines: MachineView[]; next: string | null }> {
     const listed = await this.db
       .prepare(
-        `SELECT id, name, created_at FROM machines
+        `SELECT id, name, source, user_agent, created_at FROM machines
          WHERE owner = ? AND revoked_at IS NULL AND id > ?
          ORDER BY id LIMIT ?`,
       )
       .bind(owner, after ?? "", MACHINE_PAGE + 1)
-      .all<{ id: string; name: string; created_at: number }>();
+      .all<{
+        id: string;
+        name: string;
+        source: string;
+        user_agent: string | null;
+        created_at: number;
+      }>();
     const page = listed.results.slice(0, MACHINE_PAGE);
     const requesters = await this.db
       .prepare(
@@ -167,6 +189,8 @@ export class Machines {
       machines: page.map((m) => ({
         id: m.id,
         name: m.name,
+        source: m.source,
+        userAgent: m.user_agent,
         createdAt: m.created_at,
         requesters: requesters.results
           .filter((r) => r.machine === m.name)

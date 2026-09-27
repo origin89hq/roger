@@ -564,7 +564,9 @@ pub struct LoginConfig {
     pub scope: String,
 }
 
-/// Body of `POST /v1/login`.
+/// Body of `POST /v1/login`. The Worker accepts only a token its own OAuth app
+/// issued, and revokes it before issuing a credential; a refused request also
+/// revokes it, except a refusal by the rate limiter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct MachineLogin {

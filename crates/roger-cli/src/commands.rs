@@ -11,7 +11,7 @@ use roger_protocol::{
 use serde::Serialize;
 
 use crate::cli::{ApiCommand, AskArgs, ListArgs, ListFormat, TraceArgs};
-use crate::client::{Client, ListFilter};
+use crate::client::{Client, ListFilter, holds_token};
 use crate::credentials::{self, Credentials};
 use crate::error::{Error, Result};
 use crate::login::{GITHUB_URL, GitHub, wait_for_token};
@@ -121,10 +121,17 @@ pub fn login(
     let machine = machine
         .or_else(host_machine_name)
         .ok_or(Error::NoMachineName)?;
+    check_login_url(base)?;
     let roger = Client::anonymous(base);
     let config = roger.login_config()?;
+    if config.scope != LOGIN_SCOPE {
+        return Err(Error::Login(format!(
+            "the server asked for the GitHub scope `{}`; roger login grants only {LOGIN_SCOPE}",
+            config.scope
+        )));
+    }
     let github = GitHub::new(GITHUB_URL);
-    let started = github.device_code(&config.github_client_id, &config.scope)?;
+    let started = github.device_code(&config.github_client_id, LOGIN_SCOPE)?;
     let github_token = wait_for_token(
         &started,
         |code| github.poll(&config.github_client_id, code),
@@ -167,12 +174,47 @@ pub fn login(
 
 /// Why a fresh login is not used yet: a saved token file takes precedence.
 fn token_file_notice(token_file: Option<&Path>) -> Option<String> {
-    let file = token_file.filter(|file| file.is_file())?;
+    let file = token_file.filter(|file| holds_token(file).unwrap_or(true))?;
     Some(format!(
         "{} still takes precedence over this login. Adopt its requester to this machine in \
          Settings and move the file away to use the login.",
         file.display()
     ))
+}
+
+/// The only GitHub scope `roger login` grants: enough to check team membership.
+const LOGIN_SCOPE: &str = "read:org";
+
+/// `roger login` sends a GitHub token to `base`, so it must be https, or
+/// plain http to this computer for local development.
+fn check_login_url(base: &str) -> Result<()> {
+    if base.starts_with("https://") {
+        return Ok(());
+    }
+    let host = base
+        .strip_prefix("http://")
+        .map(|rest| rest.split('/').next().unwrap_or_default())
+        .map(|authority| {
+            if authority.starts_with('[') {
+                authority
+                    .split(']')
+                    .next()
+                    .map_or("", |h| h.trim_start_matches('['))
+            } else {
+                authority.split(':').next().unwrap_or_default()
+            }
+        });
+    match host {
+        Some(host)
+            if host == "localhost"
+                || host.ends_with(".localhost")
+                || host == "127.0.0.1"
+                || host == "::1" =>
+        {
+            Ok(())
+        }
+        _ => Err(Error::InsecureLoginUrl(base.to_owned())),
+    }
 }
 
 /// `roger logout`: revokes the saved login where it was issued, then deletes it.
@@ -770,6 +812,42 @@ mod tests {
         let notice = token_file_notice(Some(&file)).ok_or("no notice")?;
         assert!(notice.starts_with(&format!("{} still takes precedence", file.display())));
         assert!(notice.contains("Adopt its requester"));
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn login_sends_github_tokens_only_over_https_or_to_this_computer() {
+        for ok in [
+            "https://roger.origin89.com",
+            "http://localhost:8792",
+            "http://127.0.0.1:8792/",
+            "http://[::1]:8792",
+            "http://roger.localhost",
+        ] {
+            assert!(check_login_url(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://roger.origin89.com",
+            "http://localhost.evil.test",
+            "http://127.0.0.1.evil.test",
+            "ftp://localhost",
+            "roger.origin89.com",
+        ] {
+            assert!(
+                matches!(check_login_url(bad), Err(Error::InsecureLoginUrl(_))),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn login_does_not_claim_a_blank_token_file_wins() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = std::env::temp_dir().join(format!("roger-cli-blank-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let file = dir.join("token");
+        std::fs::write(&file, " \n")?;
+        assert_eq!(token_file_notice(Some(&file)), None);
         std::fs::remove_dir_all(&dir)?;
         Ok(())
     }

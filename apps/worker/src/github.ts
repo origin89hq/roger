@@ -24,12 +24,14 @@ export interface GitHub {
   appUser(token: string): Promise<Responder | "foreign" | "unavailable">;
   /**
    * Revokes an access token this app issued, so one handed over by
-   * `roger login` cannot be used again. `false` if GitHub did not confirm.
+   * `roger login` cannot be used again: `revoked`, `gone` when GitHub no
+   * longer knows it (already revoked, or not this app's), or `unavailable`.
    */
-  revoke(token: string): Promise<boolean>;
+  revoke(token: string): Promise<Revocation>;
 }
 
 export type Membership = "active" | "none" | "unavailable";
+export type Revocation = "revoked" | "gone" | "unavailable";
 
 const TIMEOUT_MS = 10_000;
 
@@ -139,9 +141,11 @@ export function githubApi(clientId: string, clientSecret: string): GitHub {
             signal: AbortSignal.timeout(TIMEOUT_MS),
           },
         );
-        return response.status === 204;
+        if (response.status === 204) return "revoked";
+        if (response.status === 404 || response.status === 422) return "gone";
+        return "unavailable";
       } catch {
-        return false;
+        return "unavailable";
       }
     },
     async teamMembership(token, org, team, login) {

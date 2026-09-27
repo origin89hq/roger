@@ -2,7 +2,7 @@ import { env } from "cloudflare:test";
 import { Accounts } from "../src/accounts.ts";
 import { createApp, type Services } from "../src/app.ts";
 import { type Config, readSchedule } from "../src/config.ts";
-import type { GitHub, Membership } from "../src/github.ts";
+import type { GitHub, Membership, Revocation } from "../src/github.ts";
 import { base64url } from "../src/ids.ts";
 import { Machines } from "../src/machines.ts";
 import type { Notifier, Push } from "../src/notify.ts";
@@ -64,12 +64,15 @@ export class FakeGitHub implements GitHub {
     const user = this.users.get(token);
     return user && this.appTokens.has(token) ? user : ("foreign" as const);
   }
-  /** Tokens revoked, in order. A revoked token no longer identifies anyone. */
+  /** Revocation attempts, in order. A revoked token no longer identifies anyone. */
   revoked: string[] = [];
-  async revoke(token: string) {
+  /** Set to make every revocation fail as a GitHub outage would. */
+  revokeFails = false;
+  async revoke(token: string): Promise<Revocation> {
     this.revoked.push(token);
-    this.users.delete(token);
-    return true;
+    if (this.revokeFails) return "unavailable";
+    const known = this.users.delete(token);
+    return known ? "revoked" : "gone";
   }
 }
 

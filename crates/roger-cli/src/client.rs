@@ -75,21 +75,32 @@ pub fn resolve_auth(
     default_file: Option<&Path>,
     skipped: impl FnOnce(&Path),
 ) -> Result<Auth> {
+    // An explicit token wins without looking at the default file, so a
+    // damaged leftover file cannot break a job that names its own token.
+    if token.is_some_and(|t| !t.trim().is_empty()) || token_file.is_some() {
+        return resolve_token(token, token_file, None).map(Auth::Token);
+    }
     let default_file = default_file.filter(|path| path.is_file());
-    let blank_default = match default_file {
-        Some(path) => read_token_file(path)?.trim().is_empty(),
-        None => false,
-    };
-    let configured = token.is_some_and(|t| !t.trim().is_empty())
-        || token_file.is_some()
-        || (default_file.is_some() && !blank_default);
-    if !configured && let Some(credentials) = saved()? {
-        if let Some(path) = default_file.filter(|_| blank_default) {
+    if let Some(path) = default_file
+        && holds_token(path)?
+    {
+        return resolve_token(None, None, Some(path)).map(Auth::Token);
+    }
+    if let Some(credentials) = saved()? {
+        if let Some(path) = default_file {
             skipped(path);
         }
         return Ok(Auth::Machine(credentials));
     }
-    resolve_token(token, token_file, default_file).map(Auth::Token)
+    resolve_token(None, None, default_file).map(Auth::Token)
+}
+
+/// Whether a token file exists and holds more than whitespace.
+pub fn holds_token(path: &Path) -> Result<bool> {
+    if !path.is_file() {
+        return Ok(false);
+    }
+    Ok(!read_token_file(path)?.trim().is_empty())
 }
 
 /// Which Asks `GET /v1/asks` returns.
@@ -575,6 +586,46 @@ mod tests {
             resolve_auth(None, Some(&blank), login, None, |_| {}),
             Err(Error::MissingToken)
         ));
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn an_explicit_token_never_reads_the_default_file() -> TestResult {
+        let dir = std::env::temp_dir().join(format!("roger-cli-explicit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let named = dir.join("named");
+        std::fs::write(&named, "named-token\n")?;
+        let invalid = dir.join("invalid-utf8");
+        std::fs::write(&invalid, [0xff, 0xfe, 0x00])?;
+        let unreadable = dir.join("unreadable");
+        std::fs::write(&unreadable, "secret\n")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000))?;
+        }
+        let unread = || -> Result<Option<Credentials>> { Err(Error::NotLoggedIn) };
+        for default in [&invalid, &unreadable] {
+            assert_eq!(
+                resolve_auth(Some("env"), None, unread, Some(default), |_| {})?,
+                Auth::Token("env".to_owned())
+            );
+            assert_eq!(
+                resolve_auth(None, Some(&named), unread, Some(default), |_| {})?,
+                Auth::Token("named-token".to_owned())
+            );
+        }
+        // As the chosen fallback, a damaged default file is still an error.
+        assert!(matches!(
+            resolve_auth(None, None, unread, Some(&invalid), |_| {}),
+            Err(Error::TokenFile { .. })
+        ));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o600))?;
+        }
         std::fs::remove_dir_all(&dir)?;
         Ok(())
     }

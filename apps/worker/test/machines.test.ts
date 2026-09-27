@@ -15,9 +15,12 @@ import {
   count,
   createAsk,
   errorOf,
+  newTopic,
+  ORIGIN,
   person,
   question,
   requester,
+  send,
   services,
   type TestServices,
 } from "./helpers.ts";
@@ -216,6 +219,8 @@ describe("logging in", () => {
     });
     expect(response.status).toBe(401);
     expect(await count("machines", "owner = ?", me.githubId)).toBe(0);
+    // GitHub would refuse to revoke another app's token; Roger does not try.
+    expect(svc.github.revoked).toEqual([]);
   });
 
   it("refuses a token GitHub does not accept", async () => {
@@ -241,20 +246,110 @@ describe("logging in", () => {
     expect(svc.github.revoked).toEqual([token]);
   });
 
-  it("rejects a malformed request before calling GitHub", async () => {
+  it("revokes a received token when the rest of the request is refused", async () => {
     const svc = services();
     const me = await person(svc);
+    const badName = githubToken(svc, me);
+    const extraKey = githubToken(svc, me);
     for (const body of [
-      { githubToken: githubToken(svc, me), machine: "Studio/../x" },
-      { githubToken: "", machine: "studio" },
-      { machine: "studio" },
-      { githubToken: "x", machine: "studio", extra: 1 },
+      { githubToken: badName, machine: "Studio/../x" },
+      { githubToken: extraKey, machine: "studio", extra: 1 },
     ]) {
       const response = await exchange(svc, body);
       expect(response.status, JSON.stringify(body)).toBe(400);
     }
-    expect(svc.github.revoked).toEqual([]);
+    // No token to revoke in these.
+    for (const body of [
+      { githubToken: "", machine: "studio" },
+      { machine: "studio" },
+    ]) {
+      expect((await exchange(svc, body)).status).toBe(400);
+    }
+    // A JSON body sent without the JSON content type.
+    const unlabelled = githubToken(svc, me);
+    const wrongType = await send(
+      svc,
+      new Request(`${ORIGIN}/v1/login`, {
+        method: "POST",
+        headers: {
+          "content-type": "text/plain",
+          "cf-connecting-ip": "192.0.2.1",
+        },
+        body: JSON.stringify({ githubToken: unlabelled, machine: "studio" }),
+      }),
+    );
+    expect(wrongType.status).toBe(415);
+    expect(svc.github.revoked).toEqual([badName, extraKey, unlabelled]);
     expect(await count("machines", "owner = ?", me.githubId)).toBe(0);
+  });
+
+  it("issues nothing when GitHub does not confirm revoking the token", async () => {
+    const svc = services();
+    const me = await person(svc);
+    svc.github.revokeFails = true;
+    const token = githubToken(svc, me);
+    const response = await exchange(svc, {
+      githubToken: token,
+      machine: machineName(),
+    });
+    expect(response.status).toBe(503);
+    expect(await count("machines", "owner = ?", me.githubId)).toBe(0);
+    // Bounded retries, once per request.
+    expect(svc.github.revoked).toEqual([token, token, token]);
+  });
+
+  it("revokes when the limiter fails, but not when it refuses", async () => {
+    const svc = services();
+    const me = await person(svc);
+    svc.limiter.limit = 0;
+    const limited = githubToken(svc, me);
+    expect(
+      (await exchange(svc, { githubToken: limited, machine: machineName() }))
+        .status,
+    ).toBe(429);
+    expect(svc.github.revoked).toEqual([]);
+    svc.loginLimit = async () => {
+      throw new Error("limiter down");
+    };
+    const failed = githubToken(svc, me);
+    expect(
+      (await exchange(svc, { githubToken: failed, machine: machineName() }))
+        .status,
+    ).toBe(500);
+    expect(svc.github.revoked).toEqual([failed]);
+  });
+
+  it("records where the login came from and tells the owner", async () => {
+    const svc = services();
+    const topic = newTopic();
+    const me = await person(svc, topic);
+    const name = machineName();
+    const response = await agent(
+      svc,
+      null,
+      "POST",
+      "/v1/login",
+      { githubToken: githubToken(svc, me), machine: name },
+      {
+        "cf-connecting-ip": "203.0.113.7",
+        "user-agent": `roger/0.1.3 ${"x".repeat(300)}`,
+      },
+    );
+    expect(response.status).toBe(200);
+    await svc.settle();
+    expect(svc.notifier.sent).toHaveLength(1);
+    expect(svc.notifier.sent[0]?.topic).toBe(topic);
+    expect(svc.notifier.sent[0]?.push.message).toContain(
+      `machine ${name} from 203.0.113.7`,
+    );
+    const listed = await (
+      await browser(svc, me.cookie, "GET", "/v1/inbox/machines")
+    ).json<{
+      machines: { name: string; source: string; userAgent: string }[];
+    }>();
+    const machine = listed.machines.find((m) => m.name === name);
+    expect(machine?.source).toBe("203.0.113.7");
+    expect(machine?.userAgent).toHaveLength(200);
   });
 
   it("limits logins per client address, leaving other addresses alone", async () => {
@@ -802,7 +897,7 @@ describe("machine names", () => {
     await env.DB.batch(
       Array.from({ length: MACHINE_PAGE + 1 }, (_, i) =>
         env.DB.prepare(
-          "INSERT INTO machines (id, name, owner, hash, generation, replacing, created_at) VALUES (?, ?, ?, ?, 1, 0, 0)",
+          "INSERT INTO machines (id, name, owner, hash, generation, replacing, source, created_at) VALUES (?, ?, ?, ?, 1, 0, 'test', 0)",
         ).bind(
           `01K6A${String(i).padStart(21, "0")}`,
           `${prefix}-${i}`,
@@ -846,6 +941,13 @@ describe("machine names", () => {
       (await browser(svc, me.cookie, "GET", "/v1/inbox/machines?after=nope"))
         .status,
     ).toBe(400);
+    const firstRequesters = await (
+      await browser(svc, me.cookie, "GET", "/v1/inbox/requesters?after=")
+    ).json<{ requesters: { id: string }[] }>();
+    const plainRequesters = await (
+      await browser(svc, me.cookie, "GET", "/v1/inbox/requesters")
+    ).json<{ requesters: { id: string }[] }>();
+    expect(firstRequesters).toEqual(plainRequesters);
     const last = seen.at(-1);
     expect(
       (

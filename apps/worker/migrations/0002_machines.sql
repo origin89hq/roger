@@ -5,13 +5,15 @@
 -- whose `machine` is this name. An active name belongs to one person.
 CREATE TABLE machines (
   id            TEXT PRIMARY KEY,          -- ULID
-  name          TEXT NOT NULL,             -- chosen when approving, such as studio
+  name          TEXT NOT NULL,             -- from `roger login --machine`, such as studio
   owner         INTEGER NOT NULL REFERENCES responders(github_id),
   hash          TEXT NOT NULL UNIQUE,      -- SHA-256 of the credential; shown once
   generation    INTEGER NOT NULL,          -- per owner and name, assigned in the issuing
                                            -- statement: 1 more than any earlier login
   replacing     INTEGER NOT NULL DEFAULT 1, -- 1 until first used; that use revokes the
                                            -- owner's lower generations of the same name
+  source        TEXT NOT NULL,             -- IP address and country of the login
+  user_agent    TEXT,                      -- of the login, at most 200 characters
   created_at    INTEGER NOT NULL,
   revoked_at    INTEGER
 );

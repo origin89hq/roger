@@ -21,12 +21,29 @@ export function failure(
   return json(body, status);
 }
 
+/** Whether the request says its body is JSON. */
+export function isJson(request: Request): boolean {
+  return (
+    request.headers
+      .get("content-type")
+      ?.toLowerCase()
+      .startsWith("application/json") ?? false
+  );
+}
+
 export type Body =
   | { ok: true; value: unknown }
   | { ok: false; response: Response };
 
-/** Reads a JSON body of at most `limit` bytes, whatever Content-Length claims. */
-export async function jsonBody(request: Request, limit: number): Promise<Body> {
+/**
+ * Reads a JSON body of at most `limit` bytes, whatever Content-Length claims.
+ * With `anyType`, a body without the JSON content type is read too.
+ */
+export async function jsonBody(
+  request: Request,
+  limit: number,
+  anyType = false,
+): Promise<Body> {
   const tooLarge = {
     ok: false,
     response: failure(
@@ -35,12 +52,7 @@ export async function jsonBody(request: Request, limit: number): Promise<Body> {
       `The request body is larger than ${limit} bytes.`,
     ),
   } as const;
-  if (
-    !request.headers
-      .get("content-type")
-      ?.toLowerCase()
-      .startsWith("application/json")
-  ) {
+  if (!anyType && !isJson(request)) {
     return {
       ok: false,
       response: failure(

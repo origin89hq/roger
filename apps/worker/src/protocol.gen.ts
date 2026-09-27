@@ -252,7 +252,11 @@ export type LoginConfig = {
 	scope: string,
 };
 
-/**  Body of `POST /v1/login`. */
+/**
+ *  Body of `POST /v1/login`. The Worker accepts only a token its own OAuth app
+ *  issued, and revokes it before issuing a credential; a refused request also
+ *  revokes it, except a refusal by the rate limiter.
+ */
 export type MachineLogin = {
 	/**
 	 *  A GitHub token from the device flow. The Worker checks who it belongs
