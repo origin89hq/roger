@@ -1,12 +1,13 @@
 [package]
 name = "roger-protocol"
 version = "0.1.0"
-description = "Ask, Answer, trace, and error types shared by the Roger CLI and Worker."
+description = "Wire types of the Roger API: Asks, answers, traces, and errors."
+keywords = ["agents", "approval", "human-in-the-loop"]
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+homepage.workspace = true
 
 [dependencies]
 serde.workspace = true
