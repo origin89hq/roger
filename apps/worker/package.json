@@ -19,6 +19,6 @@
     "@origin89/brand": "0.6.0",
     "typescript": "7.0.2",
     "vitest": "4.1.11",
-    "wrangler": "4.141.0"
+    "wrangler": "4.142.0"
   }
 }
