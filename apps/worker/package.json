@@ -11,7 +11,7 @@
   "license": "MIT OR Apache-2.0",
   "dependencies": {
     "@simplewebauthn/server": "14.0.3",
-    "hono": "4.13.9",
+    "hono": "4.13.11",
     "zod": "4.6.5"
   },
   "devDependencies": {
